@@ -279,6 +279,13 @@ def run_batch(
 # --------------------------------------------------------------------------- #
 
 
+MENU_OPTIONS = {
+    "1": ("Binary (2 components)", 2),
+    "2": ("Ternary (3 components)", 3),
+    "3": ("Quaternary (4 components)", 4),
+}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Batch enthalpy calculator (2–4 components).")
     parser.add_argument(
@@ -293,8 +300,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Path to the Omega matrices workbook (defaults to calculator's setting).",
     )
-    parser.add_argument("--min-components", type=int, default=2, choices=[2, 3, 4])
-    parser.add_argument("--max-components", type=int, default=4, choices=[2, 3, 4])
+    parser.add_argument(
+        "--component-option",
+        choices=MENU_OPTIONS.keys(),
+        help="Preset options: 1=Binary, 2=Ternary, 3=Quaternary. "
+        "If omitted, an interactive menu will appear.",
+    )
     parser.add_argument(
         "--elements",
         nargs="*",
@@ -316,8 +327,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("batch_enthalpy_results.xlsx"),
-        help="Output Excel filename.",
+        default=None,
+        help="Output Excel filename (defaults to Data/batch_enthalpy_results.xlsx).",
     )
     return parser.parse_args()
 
@@ -339,17 +350,32 @@ def main() -> None:
         else calculator.ATOMIC_NUMBERS.keys()
     )
 
+    if args.component_option:
+        _, component_count = MENU_OPTIONS[args.component_option]
+    else:
+        print("Select alloy type:")
+        for key, (label, _) in MENU_OPTIONS.items():
+            print(f"{key}) {label}")
+        while True:
+            choice = input("Enter option (1/2/3): ").strip()
+            if choice in MENU_OPTIONS:
+                _, component_count = MENU_OPTIONS[choice]
+                break
+            print("Invalid option. Please enter 1, 2, or 3.")
+
     try:
         run_batch(
             calculator=calculator,
             excel_path=excel_path,
-            min_components=args.min_components,
-            max_components=args.max_components,
+            min_components=component_count,
+            max_components=component_count,
             elements=list(element_pool),
             step=args.step,
             min_fraction=min_fraction,
             chunk_size=args.chunk_size,
-            output_path=args.output,
+            output_path=Path(args.output)
+            if args.output
+            else Path("Data/batch_enthalpy_results.xlsx"),
         )
     except Exception as exc:  # pylint: disable=broad-except
         print(f"Batch processing failed: {exc}", file=sys.stderr)
