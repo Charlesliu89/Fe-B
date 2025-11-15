@@ -9,12 +9,47 @@ the Excel matrices for every pair and sum their contributions.
 from __future__ import annotations
 
 import re
+import site
+import sys
 from dataclasses import dataclass
 from itertools import combinations
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
-import pandas as pd
+
+def _extend_sys_path_with_site_packages() -> None:
+    """Ensure user/virtual-env site-packages folders are available."""
+    candidates: List[str] = []
+    for attr in ("getusersitepackages", "getsitepackages"):
+        getter = getattr(site, attr, None)
+        if getter is None:
+            continue
+        try:
+            paths = getter()
+        except Exception:  # pragma: no cover - defensive
+            continue
+        if isinstance(paths, str):
+            candidates.append(paths)
+        else:
+            candidates.extend(paths)
+    for path in candidates:
+        if path and path not in sys.path:
+            sys.path.append(path)
+
+
+def _raise_missing_package(package: str, exc: ImportError) -> None:
+    raise ModuleNotFoundError(
+        f"Missing required dependency '{package}'. "
+        "Please run `python3 -m pip install -r requirements.txt`."
+    ) from exc
+
+
+_extend_sys_path_with_site_packages()
+
+try:
+    import pandas as pd
+except ImportError as exc:  # pragma: no cover - import guard
+    _raise_missing_package("pandas", exc)
 
 OMEGA_SHEETS = ("U0", "U1", "U2", "U3")
 DEFAULT_DATABASE_PATH = Path("Data/Element pair data base matrices.xlsx")

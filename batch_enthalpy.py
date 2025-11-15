@@ -16,15 +16,58 @@ import importlib.util
 import math
 import os
 import re
+import site
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from itertools import combinations
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
-import matplotlib.pyplot as plt
-import matplotlib.tri as mtri
-import plotly.graph_objects as go
+
+def _extend_sys_path_with_site_packages() -> None:
+    """Ensure user/virtual-env site-packages folders are importable."""
+    candidates: List[str] = []
+    for attr in ("getusersitepackages", "getsitepackages"):
+        getter = getattr(site, attr, None)
+        if getter is None:
+            continue
+        try:
+            paths = getter()
+        except Exception:  # pragma: no cover - defensive
+            continue
+        if isinstance(paths, str):
+            candidates.append(paths)
+        else:
+            candidates.extend(paths)
+    for path in candidates:
+        if path and path not in sys.path:
+            sys.path.append(path)
+
+
+def _raise_missing_package(package: str, exc: ImportError) -> None:
+    raise ModuleNotFoundError(
+        f"Missing required dependency '{package}'. "
+        "Please run `python3 -m pip install -r requirements.txt`."
+    ) from exc
+
+
+_extend_sys_path_with_site_packages()
+
+try:
+    import matplotlib.pyplot as plt
+    import matplotlib.tri as mtri
+except ImportError as exc:  # pragma: no cover - import guard
+    _raise_missing_package("matplotlib", exc)
+
+try:
+    import pandas as pd
+except ImportError as exc:  # pragma: no cover - import guard
+    _raise_missing_package("pandas", exc)
+
+try:
+    import plotly.graph_objects as go
+except ImportError as exc:  # pragma: no cover - import guard
+    _raise_missing_package("plotly", exc)
 
 # --------------------------------------------------------------------------- #
 # Font configuration (edit here to change all text styles)
@@ -43,6 +86,56 @@ PLOTLY_ELEMENT_FONT = {
     "size": FONT_SIZE,
     "color": FONT_COLOR,
 }
+
+# Unified color bar label configuration (Matplotlib + Plotly共享此参数)
+COLORBAR_LABEL_CONFIG = {
+    "text": r"$\Delta H_{\mathrm{mix}}$ (kJ/mol)",
+    "rotation_deg": 0,  # clockwise rotation
+    "mat_axes_position": (0.5, 1.02),  # x/y inside Matplotlib color bar axes
+    "plotly_position": (1.05, 1.0),  # x/y in Plotly paper coordinates
+    "plotly_xanchor": "center",
+    "plotly_yanchor": "bottom",
+    "font_size": 20,
+    "font_weight": "bold",
+    "font_color": FONT_COLOR,
+}
+
+
+def add_matplotlib_colorbar_label(cbar) -> None:
+    """Apply the shared color bar label style to a Matplotlib color bar."""
+    cfg = COLORBAR_LABEL_CONFIG
+    cbar.ax.text(
+        cfg["mat_axes_position"][0],
+        cfg["mat_axes_position"][1],
+        cfg["text"],
+        transform=cbar.ax.transAxes,
+        rotation=-cfg["rotation_deg"],  # Matplotlib uses CCW-positive angles
+        ha="center",
+        va="bottom",
+        fontsize=cfg["font_size"],
+        fontweight=cfg["font_weight"],
+        color=cfg["font_color"],
+    )
+
+
+def add_plotly_colorbar_label(fig: "go.Figure") -> None:
+    """Annotate a Plotly figure with the shared color bar label style."""
+    cfg = COLORBAR_LABEL_CONFIG
+    text = cfg["text"]
+    if str(cfg["font_weight"]).lower() == "bold":
+        text = f"<b>{text}</b>"
+    fig.add_annotation(
+        x=cfg["plotly_position"][0],
+        y=cfg["plotly_position"][1],
+        xref="paper",
+        yref="paper",
+        text=text,
+        textangle=-cfg["rotation_deg"],  # Plotly also uses CCW-positive angles
+        showarrow=False,
+        xanchor=cfg["plotly_xanchor"],
+        yanchor=cfg["plotly_yanchor"],
+        font={"size": cfg["font_size"], "color": cfg["font_color"]},
+    )
 
 # --------------------------------------------------------------------------- #
 # Sampling configuration
@@ -144,7 +237,7 @@ def save_binary_plot(combo: Sequence[str], fractions: List[float], enthalpies: L
     plt.plot([f * 100 for f in fractions], enthalpies, lw=1.5)
     plt.xlabel(f"{combo[0]} atomic %")
     plt.ylabel(r"$\Delta H_{\mathrm{mix}}$ (kJ/mol)")
-    plt.title(rf"Binary $\Delta H_{{\mathrm{mix}}}$: {combo[0]}-{combo[1]}")
+    plt.title(r"Binary $\Delta H_{\mathrm{mix}}$: " + "-".join(combo))
     plt.grid(True, linestyle="--", alpha=0.3)
     plt.tight_layout()
     plt.savefig(path, dpi=200)
@@ -162,7 +255,8 @@ def save_ternary_plot(
     plt.figure(figsize=(6, 5.5))
     triang = mtri.Triangulation(xs, ys)
     mesh = plt.tripcolor(triang, values, shading="gouraud", cmap="viridis")
-    plt.colorbar(mesh, label=r"$\Delta H_{\mathrm{mix}}$ (kJ/mol)")
+    cbar = plt.colorbar(mesh)
+    add_matplotlib_colorbar_label(cbar)
     combo_label = "-".join(combo)
     plt.title(r"Ternary $\Delta H_{\mathrm{mix}}$: " + combo_label)
     # annotate corners
@@ -316,10 +410,19 @@ def run_batch(
     if worker_count == 1:
         for combo in supported_combos:
             if component_count == 2:
-                plot_binary_combination(calculator, tables, combo, total_units, output_path)
+                plot_binary_combination(
+                    calculator, tables, combo, total_units, output_path / "binary"
+                )
             else:
                 assert vectors is not None
-                plot_ternary_combination(calculator, tables, combo, vectors, total_units, output_path)
+                plot_ternary_combination(
+                    calculator,
+                    tables,
+                    combo,
+                    vectors,
+                    total_units,
+                    output_path / "ternary",
+                )
             processed += 1
     else:
         calculator_path = getattr(calculator, "__file__", None)
@@ -363,7 +466,7 @@ def plot_binary_combination(calculator, tables, combo, total_units, output_dir: 
         composition = [(combo[0], frac_a), (combo[1], frac_b)]
         total_enthalpy, _ = calculator.compute_multi_component_enthalpy(tables, composition)
         enthalpies.append(total_enthalpy)
-    save_binary_plot(combo, fractions, enthalpies, output_dir / "binary")
+    save_binary_plot(combo, fractions, enthalpies, output_dir)
 
 
 def plot_ternary_combination(
@@ -385,7 +488,7 @@ def plot_ternary_combination(
         xs.append(x)
         ys.append(y)
         values.append(total_enthalpy)
-    save_ternary_plot(combo, xs, ys, values, output_dir / "ternary")
+    save_ternary_plot(combo, xs, ys, values, output_dir)
 
 
 def handle_custom_plot(calculator, tables, output_dir: Path) -> None:
@@ -466,7 +569,7 @@ def handle_custom_plot(calculator, tables, output_dir: Path) -> None:
                     size=6,
                     color=enthalpies,
                     colorscale="Viridis",
-                    colorbar=dict(title=r"$\Delta H_{\mathrm{mix}}$ (kJ/mol)"),
+                    colorbar=dict(title=""),
                 ),
                 hovertemplate=(
                     f"{combo[0]}=%{{a:.2f}}%<br>"
@@ -489,6 +592,7 @@ def handle_custom_plot(calculator, tables, output_dir: Path) -> None:
             ),
             template="plotly_white",
         )
+        add_plotly_colorbar_label(fig)
         preview_and_maybe_save(fig, custom_dir / f"{combo[0]}-{combo[1]}-{combo[2]}.png")
     else:
         print("Quaternary plotting is not supported yet.")
