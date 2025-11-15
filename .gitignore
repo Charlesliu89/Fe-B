@@ -7,3 +7,10 @@ __pycache__/
 
 # VS Code settings (optional)
 .vscode/
+
+# macOS metadata
+.DS_Store
+Data/.DS_Store
+
+# Generated plots
+Data/plots/

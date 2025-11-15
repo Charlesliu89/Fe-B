@@ -14,11 +14,13 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import math
+import os
 import re
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from itertools import combinations
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Sequence, Tuple
+from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import matplotlib.tri as mtri
@@ -200,6 +202,59 @@ def preview_and_maybe_save(fig: go.Figure, default_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Parallel worker helpers
+# --------------------------------------------------------------------------- #
+
+_WORKER_CALCULATOR = None
+_WORKER_TABLES: Dict[str, object] | None = None
+
+
+def _parallel_initializer(calculator_path: str, tables: Dict[str, object]) -> None:
+    """Load calculator/tables once per worker process."""
+    global _WORKER_CALCULATOR, _WORKER_TABLES
+    _WORKER_CALCULATOR = load_calculator_module(Path(calculator_path))
+    _WORKER_TABLES = tables
+
+
+def _get_worker_state():
+    if _WORKER_CALCULATOR is None or _WORKER_TABLES is None:
+        raise RuntimeError("Worker state not initialized.")
+    return _WORKER_CALCULATOR, _WORKER_TABLES
+
+
+def _binary_worker_task(combo: Sequence[str], total_units: int):
+    calculator, tables = _get_worker_state()
+    fractions = [i / total_units for i in range(total_units + 1)]
+    enthalpies: List[float] = []
+    for frac_a in fractions:
+        frac_b = 1.0 - frac_a
+        composition = [(combo[0], frac_a), (combo[1], frac_b)]
+        total_enthalpy, _ = calculator.compute_multi_component_enthalpy(tables, composition)
+        enthalpies.append(total_enthalpy)
+    return combo, fractions, enthalpies
+
+
+def _ternary_worker_task(
+    combo: Sequence[str],
+    vectors: Sequence[Tuple[int, ...]],
+    total_units: int,
+):
+    calculator, tables = _get_worker_state()
+    xs: List[float] = []
+    ys: List[float] = []
+    values: List[float] = []
+    for vector in vectors:
+        fractions = fractions_from_vector(vector, total_units)
+        composition = list(zip(combo, fractions))
+        total_enthalpy, _ = calculator.compute_multi_component_enthalpy(tables, composition)
+        x, y = barycentric_to_cartesian(fractions)
+        xs.append(x)
+        ys.append(y)
+        values.append(total_enthalpy)
+    return combo, xs, ys, values
+
+
+# --------------------------------------------------------------------------- #
 # Core batch processing
 # --------------------------------------------------------------------------- #
 
@@ -210,6 +265,7 @@ def run_batch(
     component_count: int,
     elements: Sequence[str],
     output_path: Path,
+    workers: int = 1,
 ) -> None:
     """Generate one plot per element combination for the chosen component count."""
     if component_count not in {2, 3, 4}:
@@ -221,13 +277,17 @@ def run_batch(
 
     # Binary alloys require 0.1% increments regardless of the CLI step.
     total_units, actual_step = normalize_step(BINARY_STEP if component_count == 2 else TERNARY_STEP)
-    vectors = build_fraction_vectors(component_count, total_units)
-    if not vectors:
-        raise ValueError("No feasible compositions were generated with the provided step.")
+    vectors: Optional[List[Tuple[int, ...]]] = None
+    if component_count == 3:
+        vectors = build_fraction_vectors(component_count, total_units)
+        if not vectors:
+            raise ValueError("No feasible compositions were generated with the provided step.")
 
     ensure_directory(output_path)
     processed = 0
     skipped = 0
+    worker_count = 0
+    supported_combos: List[Tuple[str, ...]] = []
 
     for combo in combinations(available_elements, component_count):
         if not combo_supported(calculator, tables, combo):
@@ -235,20 +295,61 @@ def run_batch(
             continue
 
         if component_count == 2:
-            plot_binary_combination(calculator, tables, combo, total_units, output_path)
-
+            supported_combos.append(combo)
         elif component_count == 3:
-            plot_ternary_combination(calculator, tables, combo, vectors, total_units, output_path)
-
+            supported_combos.append(combo)
         else:
             print(f"[info] Skipping {combo}: quaternary plotting not implemented.")
             skipped += 1
             continue
 
-        processed += 1
+    if not supported_combos:
+        print(
+            f"[summary] step={actual_step:.4f}, workers={worker_count}: "
+            f"{processed} combinations plotted, {skipped} skipped.",
+            file=sys.stderr,
+        )
+        return
+
+    worker_count = min(max(1, workers), len(supported_combos))
+
+    if worker_count == 1:
+        for combo in supported_combos:
+            if component_count == 2:
+                plot_binary_combination(calculator, tables, combo, total_units, output_path)
+            else:
+                assert vectors is not None
+                plot_ternary_combination(calculator, tables, combo, vectors, total_units, output_path)
+            processed += 1
+    else:
+        calculator_path = getattr(calculator, "__file__", None)
+        if not calculator_path:
+            raise RuntimeError("Calculator module path is required for parallel execution.")
+        init_args = (str(calculator_path), tables)
+        with ProcessPoolExecutor(
+            max_workers=worker_count,
+            initializer=_parallel_initializer,
+            initargs=init_args,
+        ) as executor:
+            futures = []
+            for combo in supported_combos:
+                if component_count == 2:
+                    futures.append(executor.submit(_binary_worker_task, combo, total_units))
+                else:
+                    assert vectors is not None
+                    futures.append(executor.submit(_ternary_worker_task, combo, vectors, total_units))
+            for future in as_completed(futures):
+                result = future.result()
+                if component_count == 2:
+                    combo, fractions, enthalpies = result
+                    save_binary_plot(combo, fractions, enthalpies, output_path / "binary")
+                else:
+                    combo, xs, ys, values = result
+                    save_ternary_plot(combo, xs, ys, values, output_path / "ternary")
+                processed += 1
 
     print(
-        f"[summary] step={actual_step:.4f}: "
+        f"[summary] step={actual_step:.4f}, workers={worker_count}: "
         f"{processed} combinations plotted, {skipped} skipped.",
         file=sys.stderr,
     )
@@ -398,6 +499,13 @@ def handle_custom_plot(calculator, tables, output_dir: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def positive_int(value: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("Value must be a positive integer.")
+    return number
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Batch enthalpy plot generator.")
     parser.add_argument(
@@ -422,6 +530,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("Data/plots"),
         help="Directory to store generated plots (default: Data/plots).",
+    )
+    parser.add_argument(
+        "--workers",
+        type=positive_int,
+        default=os.cpu_count() or 1,
+        help="Number of parallel worker processes to use (default: CPU count).",
     )
     return parser.parse_args()
 
@@ -460,6 +574,7 @@ def main() -> None:
                     component_count=2,
                     elements=element_pool,
                     output_path=args.output_dir,
+                    workers=args.workers,
                 )
             except Exception as exc:  # pylint: disable=broad-except
                 print(f"Binary plotting failed: {exc}")
@@ -471,6 +586,7 @@ def main() -> None:
                     component_count=3,
                     elements=element_pool,
                     output_path=args.output_dir,
+                    workers=args.workers,
                 )
             except Exception as exc:  # pylint: disable=broad-except
                 print(f"Ternary plotting failed: {exc}")
