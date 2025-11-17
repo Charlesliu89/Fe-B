@@ -89,7 +89,9 @@ PLOTLY_ELEMENT_FONT = {
 
 # Unified color bar label configuration (Matplotlib + Plotly共享此参数)
 COLORBAR_LABEL_CONFIG = {
+    # Matplotlib can render the TeX-friendly string; Plotly PNG export works best with HTML.
     "text": r"$\Delta H_{\mathrm{mix}}$ (kJ/mol)",
+    "plotly_text": "ΔH<sub>mix</sub> (kJ/mol)",
     "rotation_deg": 0,  # clockwise rotation
     "mat_axes_position": (0.5, 1.02),  # x/y inside Matplotlib color bar axes
     "plotly_position": (1.05, 1.0),  # x/y in Plotly paper coordinates
@@ -121,7 +123,7 @@ def add_matplotlib_colorbar_label(cbar) -> None:
 def add_plotly_colorbar_label(fig: "go.Figure") -> None:
     """Annotate a Plotly figure with the shared color bar label style."""
     cfg = COLORBAR_LABEL_CONFIG
-    text = cfg["text"]
+    text = cfg.get("plotly_text") or cfg["text"]
     if str(cfg["font_weight"]).lower() == "bold":
         text = f"<b>{text}</b>"
     fig.add_annotation(
@@ -492,31 +494,153 @@ def plot_ternary_combination(
 
 
 def handle_custom_plot(calculator, tables, output_dir: Path) -> None:
-    raw = input("Enter element symbols separated by commas (e.g., Fe,B or Fe,B,Ni): ").strip()
-    if not raw:
-        print("No elements entered.")
-        return
-    symbols = [calculator.normalize_symbol(part) for part in re.split(r"[\\s,]+", raw) if part]
-    unique_elements = []
-    for symbol in symbols:
-        if symbol not in unique_elements:
-            unique_elements.append(symbol)
-    if len(unique_elements) < 2 or len(unique_elements) > 4:
-        print("Please provide between 2 and 4 unique elements.")
-        return
-    for element in unique_elements:
-        if element not in tables[calculator.OMEGA_SHEETS[0]].index:
-            print(f"Element {element} is not available in the database.")
+    prompt = (
+        "Enter element symbols separated by commas (e.g., Fe,B or Fe,B,Ni)"
+        " or 'b' to return to the main menu: "
+    )
+    custom_dir = ensure_directory(output_dir / "custom")
+
+    while True:
+        raw = input(prompt).strip()
+        if not raw:
+            print("No elements entered. Provide symbols or 'b' to return.")
+            continue
+        if raw.lower() in {"b", "back", "r", "return"}:
+            print("Returning to the main menu.")
             return
 
-    component_count = len(unique_elements)
+        symbols = [calculator.normalize_symbol(part) for part in re.split(r"[\\s,]+", raw) if part]
+        unique_elements = []
+        for symbol in symbols:
+            if symbol not in unique_elements:
+                unique_elements.append(symbol)
+        if len(unique_elements) < 2 or len(unique_elements) > 4:
+            print("Please provide between 2 and 4 unique elements.")
+            continue
+        for element in unique_elements:
+            if element not in tables[calculator.OMEGA_SHEETS[0]].index:
+                print(f"Element {element} is not available in the database.")
+                break
+        else:
+            component_count = len(unique_elements)
+            step_value = BINARY_STEP if component_count == 2 else TERNARY_STEP
+            total_units, _ = normalize_step(step_value)
+            combo = tuple(unique_elements)
+
+            if component_count == 2:
+                fractions = [i / total_units for i in range(total_units + 1)]
+                enthalpies = []
+                for frac_a in fractions:
+                    frac_b = 1.0 - frac_a
+                    composition = [(combo[0], frac_a), (combo[1], frac_b)]
+                    total_enthalpy, _ = calculator.compute_multi_component_enthalpy(
+                        tables, composition
+                    )
+                    enthalpies.append(total_enthalpy)
+                fig = go.Figure(
+                    go.Scatter(
+                        x=[f * 100 for f in fractions],
+                        y=enthalpies,
+                        mode="lines+markers",
+                        hovertemplate=(
+                            f"{combo[0]}=%{{x:.3f}}%\n"
+                            f"{combo[1]}=%{{customdata:.3f}}%\n"
+                            "ΔH=%{y:.5f} kJ/mol"
+                        ),
+                        customdata=[(1.0 - f) * 100 for f in fractions],
+                    )
+                )
+                fig.update_layout(
+                    title=dict(
+                        text=r"Binary $\Delta H_{\mathrm{mix}}$: " + "-".join(combo),
+                        font=PLOTLY_ELEMENT_FONT,
+                    ),
+                    xaxis=dict(title=dict(text=f"{combo[0]} atomic %", font=PLOTLY_ELEMENT_FONT)),
+                    yaxis=dict(
+                        title=dict(text=r"$\Delta H_{\mathrm{mix}}$ (kJ/mol)", font=PLOTLY_ELEMENT_FONT)
+                    ),
+                    template="plotly_white",
+                )
+                preview_and_maybe_save(fig, custom_dir / f"{combo[0]}-{combo[1]}.png")
+            elif component_count == 3:
+                vectors = build_fraction_vectors(3, total_units)
+                a_vals = []
+                b_vals = []
+                c_vals = []
+                enthalpies = []
+                for vector in vectors:
+                    fractions = fractions_from_vector(vector, total_units)
+                    composition = list(zip(combo, fractions))
+                    total_enthalpy, _ = calculator.compute_multi_component_enthalpy(
+                        tables, composition
+                    )
+                    a_vals.append(fractions[0] * 100)
+                    b_vals.append(fractions[1] * 100)
+                    c_vals.append(fractions[2] * 100)
+                    enthalpies.append(total_enthalpy)
+                fig = go.Figure(
+                    go.Scatterternary(
+                        a=a_vals,
+                        b=b_vals,
+                        c=c_vals,
+                        mode="markers",
+                        marker=dict(
+                            size=6,
+                            color=enthalpies,
+                            colorscale="Viridis",
+                            colorbar=dict(
+                                title=dict(
+                                    text=COLORBAR_LABEL_CONFIG.get("plotly_text"),
+                                    font=PLOTLY_ELEMENT_FONT,
+                                ),
+                            ),
+                        ),
+                        hovertemplate=(
+                            f"{combo[0]}=%{{a:.2f}}%<br>"
+                            f"{combo[1]}=%{{b:.2f}}%<br>"
+                            f"{combo[2]}=%{{c:.2f}}%<br>"
+                            "ΔH=%{marker.color:.5f} kJ/mol"
+                        ),
+                    )
+                )
+                fig.update_layout(
+                    title=dict(
+                        text=f"Ternary ΔH<sub>mix</sub>: {'-'.join(combo)}",
+                        font=PLOTLY_ELEMENT_FONT,
+                    ),
+                    ternary=dict(
+                        sum=100,
+                        aaxis=dict(title=dict(text=combo[0], font=PLOTLY_ELEMENT_FONT)),
+                        baxis=dict(title=dict(text=combo[1], font=PLOTLY_ELEMENT_FONT)),
+                        caxis=dict(title=dict(text=combo[2], font=PLOTLY_ELEMENT_FONT)),
+                    ),
+                    template="plotly_white",
+                )
+                preview_and_maybe_save(fig, custom_dir / f"{combo[0]}-{combo[1]}-{combo[2]}.png")
+            else:
+                print("Quaternary plotting is not supported yet.")
+
+
+def build_custom_plot(
+    calculator,
+    tables,
+    elements: Sequence[str],
+) -> Tuple[go.Figure, str]:
+    """Create a Plotly figure for 2–3 elements without interactive input."""
+    if len(elements) < 2 or len(elements) > 4:
+        raise ValueError("Please provide between 2 and 4 unique elements.")
+    for element in elements:
+        if element not in tables[calculator.OMEGA_SHEETS[0]].index:
+            raise ValueError(f"Element {element} is not available in the database.")
+
+    component_count = len(elements)
     step_value = BINARY_STEP if component_count == 2 else TERNARY_STEP
     total_units, _ = normalize_step(step_value)
-    custom_dir = ensure_directory(output_dir / "custom")
-    combo = tuple(unique_elements)
+    combo = tuple(elements)
+
     if component_count == 2:
         fractions = [i / total_units for i in range(total_units + 1)]
-        enthalpies = []
+        enthalpies: List[float] = []
         for frac_a in fractions:
             frac_b = 1.0 - frac_a
             composition = [(combo[0], frac_a), (combo[1], frac_b)]
@@ -528,7 +652,9 @@ def handle_custom_plot(calculator, tables, output_dir: Path) -> None:
                 y=enthalpies,
                 mode="lines+markers",
                 hovertemplate=(
-                    f"{combo[0]}=%{{x:.3f}}%\n{combo[1]}=%{{customdata:.3f}}%\nΔH=%{{y:.5f}} kJ/mol"
+                    f"{combo[0]}=%{{x:.3f}}%\n"
+                    f"{combo[1]}=%{{customdata:.3f}}%\n"
+                    "ΔH=%{y:.5f} kJ/mol"
                 ),
                 customdata=[(1.0 - f) * 100 for f in fractions],
             )
@@ -539,18 +665,17 @@ def handle_custom_plot(calculator, tables, output_dir: Path) -> None:
                 font=PLOTLY_ELEMENT_FONT,
             ),
             xaxis=dict(title=dict(text=f"{combo[0]} atomic %", font=PLOTLY_ELEMENT_FONT)),
-            yaxis=dict(
-                title=dict(text=r"$\Delta H_{\mathrm{mix}}$ (kJ/mol)", font=PLOTLY_ELEMENT_FONT)
-            ),
+            yaxis=dict(title=dict(text=r"$\Delta H_{\mathrm{mix}}$ (kJ/mol)", font=PLOTLY_ELEMENT_FONT)),
             template="plotly_white",
         )
-        preview_and_maybe_save(fig, custom_dir / f"{combo[0]}-{combo[1]}.png")
-    elif component_count == 3:
+        return fig, f"{combo[0]}-{combo[1]}.png"
+
+    if component_count == 3:
         vectors = build_fraction_vectors(3, total_units)
-        a_vals = []
-        b_vals = []
-        c_vals = []
-        enthalpies = []
+        a_vals: List[float] = []
+        b_vals: List[float] = []
+        c_vals: List[float] = []
+        enthalpies: List[float] = []
         for vector in vectors:
             fractions = fractions_from_vector(vector, total_units)
             composition = list(zip(combo, fractions))
@@ -569,7 +694,12 @@ def handle_custom_plot(calculator, tables, output_dir: Path) -> None:
                     size=6,
                     color=enthalpies,
                     colorscale="Viridis",
-                    colorbar=dict(title=""),
+                    colorbar=dict(
+                        title=dict(
+                            text=COLORBAR_LABEL_CONFIG.get("plotly_text"),
+                            font=PLOTLY_ELEMENT_FONT,
+                        ),
+                    ),
                 ),
                 hovertemplate=(
                     f"{combo[0]}=%{{a:.2f}}%<br>"
@@ -592,10 +722,40 @@ def handle_custom_plot(calculator, tables, output_dir: Path) -> None:
             ),
             template="plotly_white",
         )
-        add_plotly_colorbar_label(fig)
-        preview_and_maybe_save(fig, custom_dir / f"{combo[0]}-{combo[1]}-{combo[2]}.png")
-    else:
-        print("Quaternary plotting is not supported yet.")
+        return fig, f"{combo[0]}-{combo[1]}-{combo[2]}.png"
+
+    raise ValueError("Quaternary plotting is not supported yet.")
+
+
+def generate_custom_plots(
+    calculator,
+    tables,
+    combos: Sequence[Sequence[str]],
+    output_dir: Path,
+) -> List[Path]:
+    """Programmatically generate custom plots for given combos."""
+    custom_dir = ensure_directory(output_dir / "custom")
+    saved: List[Path] = []
+
+    for elements in combos:
+        try:
+            fig, filename = build_custom_plot(calculator, tables, elements)
+        except ValueError as exc:
+            print(f"[auto] Skipping {elements}: {exc}")
+            continue
+
+        target = custom_dir / filename
+        try:
+            fig.write_image(str(target))
+            print(f"[auto] Saved PNG to {target}")
+            saved.append(target)
+        except Exception as exc:  # pylint: disable=broad-except
+            alt_path = target.with_suffix(".html")
+            fig.write_html(str(alt_path))
+            print(f"[auto] PNG export failed ({exc}); saved interactive HTML to {alt_path}")
+            saved.append(alt_path)
+
+    return saved
 
 
 # --------------------------------------------------------------------------- #
@@ -636,6 +796,14 @@ def parse_args() -> argparse.Namespace:
         help="Directory to store generated plots (default: Data/plots).",
     )
     parser.add_argument(
+        "--auto-combo",
+        action="append",
+        help=(
+            "Non-interactive mode: provide a comma-separated element list "
+            "(e.g., 'Fe,B,Ni'); can be repeated to render multiple combos then exit."
+        ),
+    )
+    parser.add_argument(
         "--workers",
         type=positive_int,
         default=os.cpu_count() or 1,
@@ -660,6 +828,25 @@ def main() -> None:
         if args.elements
         else list(tables[calculator.OMEGA_SHEETS[0]].index)
     )
+
+    if args.auto_combo:
+        combos: List[List[str]] = []
+        for raw in args.auto_combo:
+            parts = [calculator.normalize_symbol(part) for part in re.split(r"[\\s,]+", raw) if part]
+            if not parts:
+                print(f"[auto] Skipping empty combo input: {raw!r}")
+                continue
+            unique: List[str] = []
+            for symbol in parts:
+                if symbol not in unique:
+                    unique.append(symbol)
+            combos.append(unique)
+
+        if combos:
+            generate_custom_plots(calculator, tables, combos, args.output_dir)
+        else:
+            print("[auto] No valid combinations were provided.")
+        return
 
     while True:
         print("\n=== Enthalpy Plot Menu ===")
