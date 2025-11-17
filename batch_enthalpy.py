@@ -5,7 +5,7 @@ Batch enthalpy of mixing visualizer.
 Generates ΔH_mix curves/contours by reusing the single-pair calculator:
 1) Batch binary line plots (0–100% at 0.1% increments)
 2) Batch ternary contour plots (barycentric triangle)
-3) (Reserved) Quaternary – currently skipped
+3) Quaternary interactive tetrahedron preview (optional slice export)
 4) Custom combination preview with Plotly (hover + draggable labels, optional export)
 """
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import math
 import os
 import re
 import site
@@ -260,12 +261,193 @@ def build_ternary_figure(
     apply_plotly_base_style(fig)
     return fig
 
+
+def barycentric_to_cartesian(fractions: Sequence[float]) -> Tuple[float, float, float]:
+    """Map 4-component barycentric coordinates to a regular tetrahedron in 3D space."""
+
+    if len(fractions) != 4:
+        raise ValueError("Quaternary barycentric coordinates require four fractions.")
+
+    vertices = [
+        (0.0, 0.0, 0.0),
+        (1.0, 0.0, 0.0),
+        (0.5, math.sqrt(3) / 2.0, 0.0),
+        (0.5, math.sqrt(3) / 6.0, math.sqrt(2.0 / 3.0)),
+    ]
+    x = sum(f * v[0] for f, v in zip(fractions, vertices))
+    y = sum(f * v[1] for f, v in zip(fractions, vertices))
+    z = sum(f * v[2] for f, v in zip(fractions, vertices))
+    return x, y, z
+
+
+def build_quaternary_points(
+    calculator,
+    tables,
+    combo: Sequence[str],
+    vectors: Sequence[Tuple[int, ...]],
+    total_units: int,
+) -> Tuple[List[float], List[float], List[float], List[float], List[Tuple[float, ...]]]:
+    """Compute 3D coordinates, enthalpies, and raw fraction tuples for quaternary alloys."""
+
+    x_vals: List[float] = []
+    y_vals: List[float] = []
+    z_vals: List[float] = []
+    enthalpies: List[float] = []
+    fractions_list: List[Tuple[float, ...]] = []
+
+    for vector in vectors:
+        fractions = fractions_from_vector(vector, total_units)
+        composition = list(zip(combo, fractions))
+        total_enthalpy, _ = calculator.compute_multi_component_enthalpy(tables, composition)
+        x, y, z = barycentric_to_cartesian(fractions)
+        x_vals.append(x)
+        y_vals.append(y)
+        z_vals.append(z)
+        enthalpies.append(total_enthalpy)
+        fractions_list.append(fractions)
+
+    return x_vals, y_vals, z_vals, enthalpies, fractions_list
+
+
+def build_quaternary_figure(
+    combo: Sequence[str],
+    x_vals: Sequence[float],
+    y_vals: Sequence[float],
+    z_vals: Sequence[float],
+    enthalpies: Sequence[float],
+    fractions: Sequence[Tuple[float, ...]],
+) -> "go.Figure":
+    """Return a rotatable Plotly tetrahedron with color-coded ΔH_mix distribution."""
+
+    vertex_labels = []
+    vertices = [
+        (0.0, 0.0, 0.0),
+        (1.0, 0.0, 0.0),
+        (0.5, math.sqrt(3) / 2.0, 0.0),
+        (0.5, math.sqrt(3) / 6.0, math.sqrt(2.0 / 3.0)),
+    ]
+    for idx, name in enumerate(combo):
+        vertex_labels.append(
+            go.Scatter3d(
+                x=[vertices[idx][0]],
+                y=[vertices[idx][1]],
+                z=[vertices[idx][2]],
+                mode="text",
+                text=[f"<b>{name}</b>"],
+                textfont=dict(**PLOTLY_ELEMENT_FONT, size=FONT_SIZE + 2),
+                hoverinfo="skip",
+                showlegend=False,
+            )
+        )
+
+    edges = [
+        (0, 1),
+        (0, 2),
+        (0, 3),
+        (1, 2),
+        (1, 3),
+        (2, 3),
+    ]
+    edge_traces = []
+    for a_idx, b_idx in edges:
+        edge_traces.append(
+            go.Scatter3d(
+                x=[vertices[a_idx][0], vertices[b_idx][0]],
+                y=[vertices[a_idx][1], vertices[b_idx][1]],
+                z=[vertices[a_idx][2], vertices[b_idx][2]],
+                mode="lines",
+                line=dict(color="black", width=2),
+                hoverinfo="skip",
+                showlegend=False,
+            )
+        )
+
+    hover_lines = []
+    for frac in fractions:
+        hover_lines.append(
+            "<br>".join(
+                f"{elem}={value * 100:.2f}%" for elem, value in zip(combo, frac)
+            )
+        )
+
+    shell = go.Mesh3d(
+        x=[v[0] for v in vertices],
+        y=[v[1] for v in vertices],
+        z=[v[2] for v in vertices],
+        i=[0, 0, 0, 1],
+        j=[1, 2, 3, 2],
+        k=[2, 3, 1, 3],
+        opacity=0.15,
+        color="lightgray",
+        flatshading=True,
+        name="composition space",
+        hoverinfo="skip",
+        showscale=False,
+    )
+
+    scatter = go.Scatter3d(
+        x=x_vals,
+        y=y_vals,
+        z=z_vals,
+        mode="markers",
+        marker=dict(
+            size=4,
+            color=enthalpies,
+            colorscale="Viridis",
+            opacity=0.75,
+            colorbar=dict(
+                title=dict(text=COLORBAR_LABEL_CONFIG.get("plotly_text"), font=PLOTLY_ELEMENT_FONT),
+                len=0.6,
+            ),
+        ),
+        hovertemplate="%{text}<br>ΔH=%{marker.color:.5f} kJ/mol",
+        text=hover_lines,
+    )
+
+    fig = go.Figure([shell, scatter, *edge_traces, *vertex_labels])
+    fig.update_layout(
+        title=dict(
+            text=f"Quaternary ΔH<sub>mix</sub>: {'-'.join(combo)}", font=PLOTLY_ELEMENT_FONT
+        ),
+        scene=dict(
+            xaxis=dict(
+                title="X",
+                showticklabels=False,
+                showgrid=False,
+                zeroline=False,
+                backgroundcolor="white",
+            ),
+            yaxis=dict(
+                title="Y",
+                showticklabels=False,
+                showgrid=False,
+                zeroline=False,
+                backgroundcolor="white",
+            ),
+            zaxis=dict(
+                title="Z",
+                showticklabels=False,
+                showgrid=False,
+                zeroline=False,
+                backgroundcolor="white",
+            ),
+            aspectmode="data",
+        ),
+        margin=dict(l=0, r=0, t=60, b=0),
+        template="plotly_white",
+    )
+    apply_plotly_base_style(fig)
+    add_plotly_colorbar_label(fig)
+    return fig
+
 # --------------------------------------------------------------------------- #
 # Sampling configuration
 # --------------------------------------------------------------------------- #
 
 BINARY_STEP = 0.001  # 0.1%
 TERNARY_STEP = 0.01  # 1%
+QUATERNARY_STEP = 0.05  # 5% for manageable preview density
+QUATERNARY_MIN_STEP = 0.01  # allow finer previews when desired
 BATCH_CHUNK_SIZE = 100
 
 # --------------------------------------------------------------------------- #
@@ -358,6 +540,49 @@ def preview_and_maybe_save(fig: go.Figure, default_path: Path) -> None:
             alt_path = default_path.with_suffix(".html")
             fig.write_html(str(alt_path))
             print(f"PNG export failed ({exc}); saved interactive HTML to {alt_path}")
+
+
+def _slice_quaternary_data(
+    combo: Sequence[str],
+    fractions: Sequence[Tuple[float, ...]],
+    enthalpies: Sequence[float],
+    fixed_element: str,
+    fixed_fraction: float,
+    tolerance: float,
+) -> Tuple[Sequence[str], List[float], List[float], List[float], List[float]]:
+    """Extract a ternary slice by fixing one element's fraction (within tolerance)."""
+
+    if fixed_fraction <= 0 or fixed_fraction >= 1:
+        raise ValueError("Fixed fraction must be within (0, 1).")
+
+    if fixed_element not in combo:
+        raise ValueError(f"{fixed_element} is not part of the chosen quaternary system.")
+
+    fixed_index = combo.index(fixed_element)
+    remaining_elements = [elem for elem in combo if elem != fixed_element]
+
+    a_vals: List[float] = []
+    b_vals: List[float] = []
+    c_vals: List[float] = []
+    enthalpy_slice: List[float] = []
+
+    for frac, enthalpy in zip(fractions, enthalpies):
+        if abs(frac[fixed_index] - fixed_fraction) > tolerance:
+            continue
+        remainder = 1.0 - fixed_fraction
+        if remainder <= 0:
+            continue
+
+        renormalized = [value / remainder for idx, value in enumerate(frac) if idx != fixed_index]
+        if len(renormalized) != 3:
+            continue
+
+        a_vals.append(renormalized[0] * 100)
+        b_vals.append(renormalized[1] * 100)
+        c_vals.append(renormalized[2] * 100)
+        enthalpy_slice.append(enthalpy)
+
+    return remaining_elements, a_vals, b_vals, c_vals, enthalpy_slice
 
 
 # --------------------------------------------------------------------------- #
@@ -457,7 +682,9 @@ def run_batch(
         if component_count in {2, 3}:
             supported_combos.append(combo)
         else:
-            print(f"[info] Skipping {combo}: quaternary plotting not implemented.")
+            print(
+                f"[info] Skipping {combo}: use menu option 3 for quaternary preview/slices."
+            )
             skipped += 1
             continue
 
@@ -592,6 +819,123 @@ def handle_custom_plot(calculator, tables, output_dir: Path) -> None:
             preview_and_maybe_save(fig, custom_dir / filename)
 
 
+def handle_quaternary_preview(calculator, tables, output_dir: Path) -> None:
+    """Interactive menu entry for quaternary ΔH_mix preview and slice export."""
+
+    prompt = "Enter four element symbols separated by commas (or 'b' to return): "
+    quaternary_dir = ensure_directory(output_dir / "quaternary")
+
+    while True:
+        raw = input(prompt).strip()
+        if not raw:
+            print("No elements entered. Please provide four symbols or 'b' to return.")
+            continue
+        if raw.lower() in {"b", "back", "r", "return"}:
+            print("Returning to the main menu.")
+            return
+
+        elements = [calculator.normalize_symbol(part) for part in re.split(r"[\\s,]+", raw) if part]
+        unique_elements: List[str] = []
+        for element in elements:
+            if element not in unique_elements:
+                unique_elements.append(element)
+
+        if len(unique_elements) != 4:
+            print("Please provide exactly four unique elements.")
+            continue
+
+        if not combo_supported(calculator, tables, unique_elements):
+            print("Ω data is incomplete for at least one element pair; choose a different set.")
+            continue
+
+        density_raw = input(
+            "Preview step size in % (press Enter for default 5%): "
+        ).strip()
+        preview_step = QUATERNARY_STEP
+        if density_raw:
+            try:
+                preview_step = float(density_raw) / 100.0
+                if preview_step <= 0:
+                    raise ValueError
+                if preview_step < QUATERNARY_MIN_STEP:
+                    print(
+                        f"Clamping to minimum step {QUATERNARY_MIN_STEP * 100:.1f}% for stability."
+                    )
+                    preview_step = QUATERNARY_MIN_STEP
+            except ValueError:
+                print("Invalid percentage. Using default 5% step.")
+                preview_step = QUATERNARY_STEP
+
+        total_units, actual_step = normalize_step(preview_step)
+        vectors = build_fraction_vectors(4, total_units)
+        if not vectors:
+            print(
+                f"No feasible compositions generated for step={actual_step:.3f}. "
+                "Adjust QUATERNARY_STEP if needed."
+            )
+            continue
+
+        print(
+            f"Sampling {len(vectors)} compositions with {actual_step * 100:.2f}% increments."
+        )
+
+        combo = tuple(unique_elements)
+        x_vals, y_vals, z_vals, enthalpies, fractions = build_quaternary_points(
+            calculator, tables, combo, vectors, total_units
+        )
+        fig = build_quaternary_figure(combo, x_vals, y_vals, z_vals, enthalpies, fractions)
+        fig.show(config={"displaylogo": False, "displayModeBar": True})
+
+        while True:
+            slice_choice = input(
+                "Export ternary projection by fixing one element (e.g., Fe=25)? (y/n): "
+            ).strip().lower()
+            if slice_choice in {"n", "no"}:
+                break
+            if slice_choice not in {"y", "yes"}:
+                print("Please answer 'y' or 'n'.")
+                continue
+
+            slice_raw = input("Enter element=fraction% to fix (e.g., Fe=25): ").strip()
+            match = re.match(r"([A-Za-z]+)\s*=\s*([0-9]+(?:\.[0-9]+)?)", slice_raw)
+            if not match:
+                print("Invalid format. Use Element=number (percentage).")
+                continue
+
+            element = calculator.normalize_symbol(match.group(1))
+            fraction_percent = float(match.group(2))
+            if fraction_percent <= 0 or fraction_percent >= 100:
+                print("Fraction must be between 0 and 100 (exclusive).")
+                continue
+
+            try:
+                remaining_elements, a_vals, b_vals, c_vals, enthalpy_slice = _slice_quaternary_data(
+                    combo,
+                    fractions,
+                    enthalpies,
+                    element,
+                    fraction_percent / 100.0,
+                    tolerance=actual_step / 2,
+                )
+            except ValueError as exc:
+                print(exc)
+                continue
+
+            if not enthalpy_slice:
+                print(
+                    "No compositions matched that fixed fraction. "
+                    "Consider relaxing QUATERNARY_STEP."
+                )
+                continue
+
+            slice_fig = build_ternary_figure(
+                remaining_elements, a_vals, b_vals, c_vals, enthalpy_slice
+            )
+            filename = f"{'-'.join(combo)}_{element}{fraction_percent:.0f}.png"
+            preview_and_maybe_save(slice_fig, quaternary_dir / filename)
+            break
+
+
 def build_custom_plot(
     calculator,
     tables,
@@ -606,7 +950,7 @@ def build_custom_plot(
 
     component_count = len(elements)
     step_value = BINARY_STEP if component_count == 2 else TERNARY_STEP
-    total_units, _ = normalize_step(step_value)
+    total_units, _ = normalize_step(step_value if component_count < 4 else QUATERNARY_STEP)
     combo = tuple(elements)
 
     if component_count == 2:
@@ -622,7 +966,17 @@ def build_custom_plot(
         fig = build_ternary_figure(combo, a_vals, b_vals, c_vals, enthalpies)
         return fig, f"{combo[0]}-{combo[1]}-{combo[2]}.png"
 
-    raise ValueError("Quaternary plotting is not supported yet.")
+    if component_count == 4:
+        vectors = build_fraction_vectors(4, total_units)
+        if not vectors:
+            raise ValueError("No feasible quaternary compositions were generated.")
+        x_vals, y_vals, z_vals, enthalpies, fractions = build_quaternary_points(
+            calculator, tables, combo, vectors, total_units
+        )
+        fig = build_quaternary_figure(combo, x_vals, y_vals, z_vals, enthalpies, fractions)
+        return fig, f"{combo[0]}-{combo[1]}-{combo[2]}-{combo[3]}.png"
+
+    raise ValueError("Unsupported component count.")
 
 
 def generate_custom_plots(
@@ -750,7 +1104,7 @@ def main() -> None:
         print("\n=== Enthalpy Plot Menu ===")
         print("1) Batch binary ΔH_mix curves")
         print("2) Batch ternary ΔH_mix contour plots")
-        print("3) Batch quaternary (not supported)")
+        print("3) Quaternary ΔH_mix tetrahedron (preview + slice export)")
         print("4) Custom combination plot")
         print("q) Quit")
         choice = input("Select an option: ").strip().lower()
@@ -780,7 +1134,10 @@ def main() -> None:
             except Exception as exc:  # pylint: disable=broad-except
                 print(f"Ternary plotting failed: {exc}")
         elif choice == "3":
-            print("Quaternary visualizations are not supported at the moment.")
+            try:
+                handle_quaternary_preview(calculator, tables, args.output_dir)
+            except Exception as exc:  # pylint: disable=broad-except
+                print(f"Quaternary preview failed: {exc}")
         elif choice == "4":
             handle_custom_plot(calculator, tables, args.output_dir)
         elif choice in {"q", "quit", "exit"}:
