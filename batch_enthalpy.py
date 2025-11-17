@@ -69,6 +69,16 @@ try:
 except ImportError as exc:  # pragma: no cover - import guard
     _raise_missing_package("plotly", exc)
 
+DEFAULT_FONT_FAMILY = "DejaVu Sans"
+
+# Ensure Δ / Greek letters render correctly across Matplotlib outputs
+plt.rcParams.update(
+    {
+        "font.family": DEFAULT_FONT_FAMILY,
+        "axes.unicode_minus": False,
+    }
+)
+
 # --------------------------------------------------------------------------- #
 # Font configuration (edit here to change all text styles)
 # --------------------------------------------------------------------------- #
@@ -77,14 +87,20 @@ FONT_SIZE = 20
 FONT_COLOR = "black"
 FONT_WEIGHT = "bold"
 
+PLOTLY_BASE_FONT = {
+    "family": DEFAULT_FONT_FAMILY,
+    "color": FONT_COLOR,
+}
+
 ELEMENT_LABEL_FONT = {
     "fontsize": FONT_SIZE,
     "fontweight": FONT_WEIGHT,
+    "fontfamily": DEFAULT_FONT_FAMILY,
     "color": FONT_COLOR,
 }
 PLOTLY_ELEMENT_FONT = {
+    **PLOTLY_BASE_FONT,
     "size": FONT_SIZE,
-    "color": FONT_COLOR,
 }
 
 # Unified color bar label configuration (Matplotlib + Plotly共享此参数)
@@ -100,6 +116,7 @@ COLORBAR_LABEL_CONFIG = {
     "font_size": 20,
     "font_weight": "bold",
     "font_color": FONT_COLOR,
+    "font_family": DEFAULT_FONT_FAMILY,
 }
 
 
@@ -136,8 +153,17 @@ def add_plotly_colorbar_label(fig: "go.Figure") -> None:
         showarrow=False,
         xanchor=cfg["plotly_xanchor"],
         yanchor=cfg["plotly_yanchor"],
-        font={"size": cfg["font_size"], "color": cfg["font_color"]},
+        font={
+            "family": cfg["font_family"],
+            "size": cfg["font_size"],
+            "color": cfg["font_color"],
+        },
     )
+
+
+def apply_plotly_base_style(fig: "go.Figure") -> None:
+    """Ensure Plotly figures use a Unicode-safe font everywhere."""
+    fig.update_layout(font=PLOTLY_BASE_FONT)
 
 # --------------------------------------------------------------------------- #
 # Sampling configuration
@@ -561,6 +587,7 @@ def handle_custom_plot(calculator, tables, output_dir: Path) -> None:
                     ),
                     template="plotly_white",
                 )
+                apply_plotly_base_style(fig)
                 preview_and_maybe_save(fig, custom_dir / f"{combo[0]}-{combo[1]}.png")
             elif component_count == 3:
                 vectors = build_fraction_vectors(3, total_units)
@@ -616,6 +643,7 @@ def handle_custom_plot(calculator, tables, output_dir: Path) -> None:
                     ),
                     template="plotly_white",
                 )
+                apply_plotly_base_style(fig)
                 preview_and_maybe_save(fig, custom_dir / f"{combo[0]}-{combo[1]}-{combo[2]}.png")
             else:
                 print("Quaternary plotting is not supported yet.")
@@ -668,6 +696,7 @@ def build_custom_plot(
             yaxis=dict(title=dict(text=r"$\Delta H_{\mathrm{mix}}$ (kJ/mol)", font=PLOTLY_ELEMENT_FONT)),
             template="plotly_white",
         )
+        apply_plotly_base_style(fig)
         return fig, f"{combo[0]}-{combo[1]}.png"
 
     if component_count == 3:
@@ -722,6 +751,7 @@ def build_custom_plot(
             ),
             template="plotly_white",
         )
+        apply_plotly_base_style(fig)
         return fig, f"{combo[0]}-{combo[1]}-{combo[2]}.png"
 
     raise ValueError("Quaternary plotting is not supported yet.")
