@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 import site
 import sys
+import argparse
 from dataclasses import dataclass
 from itertools import combinations
 from pathlib import Path
@@ -279,12 +280,6 @@ def compute_multi_component_enthalpy(
     return total_enthalpy, details
 
 
-def prompt_excel_path(default_path: Path) -> Path:
-    """Prompt the user for an Excel path and fall back to the default path."""
-    raw = input(f"Excel workbook path (press Enter for {default_path}): ").strip()
-    return Path(raw) if raw else default_path
-
-
 def print_composition_summary(composition: Composition) -> None:
     """Display normalized atomic fractions."""
     print("\nNormalized atomic fractions:")
@@ -313,16 +308,20 @@ def print_total_enthalpy(total: float) -> None:
     print(f"\nTotal ΔH_mix = {total:.5f} kJ/mol\n")
 
 
-def run_excel_line_calculator() -> None:
+def run_excel_line_calculator(
+    tables: Dict[str, pd.DataFrame] | None = None, default_path: Path = DEFAULT_DATABASE_PATH
+) -> None:
     """Excel-driven calculator that accepts a single-line multi-element input."""
     print("\n--- Excel-driven multi-component calculator ---")
-    path = prompt_excel_path(DEFAULT_DATABASE_PATH)
 
-    try:
-        tables = load_omega_tables(path)
-    except Exception as exc:  # pylint: disable=broad-except
-        print(f"Failed to load Excel data: {exc}")
-        return
+    if tables is None:
+        raw = input(f"Excel workbook path (press Enter for {default_path}): ").strip()
+        path = Path(raw) if raw else default_path
+        try:
+            tables = load_omega_tables(path)
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"Failed to load Excel data: {exc}")
+            return
 
     print("Example input: Fe 20 Al 30 Ni 50  or  Fe=20,Al=30,Ni=50  (empty line to exit)")
     while True:
@@ -353,10 +352,70 @@ def run_excel_line_calculator() -> None:
         print_pair_contributions(details)
         print_total_enthalpy(total_enthalpy)
 
+
+def list_supported_elements(tables: Dict[str, pd.DataFrame]) -> List[str]:
+    """Return the elements present in the loaded Ω tables."""
+    return list(tables[OMEGA_SHEETS[0]].index)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Binary alloy enthalpy of mixing calculator (Excel-driven)."
+    )
+    parser.add_argument(
+        "--excel",
+        type=Path,
+        default=DEFAULT_DATABASE_PATH,
+        help="Path to the Omega matrices workbook (default: Data/Element pair data base matrices.xlsx).",
+    )
+    parser.add_argument(
+        "--line",
+        help="Optional composition line to evaluate once (e.g., \"Fe 20 Al 80\").",
+    )
+    parser.add_argument(
+        "--list-elements",
+        action="store_true",
+        help="Print supported elements from the workbook and exit.",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
-    """Entry point; run the Excel calculator once."""
+    """Entry point; run once non-interactively or fall back to interactive mode."""
+    args = parse_args()
+
     try:
-        run_excel_line_calculator()
+        tables = load_omega_tables(args.excel)
+    except Exception as exc:  # pylint: disable=broad-except
+        print(f"Failed to load Excel data: {exc}")
+        return
+
+    if args.list_elements:
+        print("Supported elements:")
+        for el in list_supported_elements(tables):
+            print(f"- {el}")
+        return
+
+    if args.line:
+        try:
+            composition = parse_composition_line(args.line)
+        except ValueError as exc:
+            print(f"Invalid input: {exc}")
+            return
+
+        try:
+            total_enthalpy, details = compute_multi_component_enthalpy(tables, composition)
+        except KeyError as exc:
+            print(exc)
+            return
+
+        print_composition_summary(composition)
+        print_pair_contributions(details)
+        print_total_enthalpy(total_enthalpy)
+        return
+
+    try:
+        run_excel_line_calculator(tables=tables, default_path=args.excel)
     except KeyboardInterrupt:
         print("\nInterrupted by user. Exiting.")
 

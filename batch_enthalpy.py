@@ -405,6 +405,7 @@ def build_quaternary_figure(
     )
 
     fig = go.Figure([shell, scatter, *edge_traces, *vertex_labels])
+    fig = go.Figure([scatter, *edge_traces, *vertex_labels])
     fig.update_layout(
         title=dict(
             text=f"Quaternary ΔH<sub>mix</sub>: {'-'.join(combo)}", font=PLOTLY_ELEMENT_FONT
@@ -431,6 +432,9 @@ def build_quaternary_figure(
                 zeroline=False,
                 backgroundcolor="white",
             ),
+            xaxis_title="X",
+            yaxis_title="Y",
+            zaxis_title="Z",
             aspectmode="data",
         ),
         margin=dict(l=0, r=0, t=60, b=0),
@@ -867,6 +871,7 @@ def handle_quaternary_preview(calculator, tables, output_dir: Path) -> None:
                 preview_step = QUATERNARY_STEP
 
         total_units, actual_step = normalize_step(preview_step)
+        total_units, actual_step = normalize_step(QUATERNARY_STEP)
         vectors = build_fraction_vectors(4, total_units)
         if not vectors:
             print(
@@ -916,6 +921,7 @@ def handle_quaternary_preview(calculator, tables, output_dir: Path) -> None:
                     element,
                     fraction_percent / 100.0,
                     tolerance=actual_step / 2,
+                    tolerance=QUATERNARY_STEP / 2,
                 )
             except ValueError as exc:
                 print(exc)

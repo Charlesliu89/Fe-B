@@ -3,6 +3,7 @@
 本仓库提供两个 Python 脚本，基于 `Data/Element pair data base matrices.xlsx` 中的 Ω 矩阵，帮助计算与可视化合金的混合焓。
 
 - **enthalpy of mixing.py**：交互式单配方计算器，读取一行元素配比后输出归一化原子分数、各元素对的贡献以及总 ΔH<sub>mix</sub>。
+- **enthalpy of mixing.py**：交互式 / 命令行单配方计算器，读取一行元素配比后输出归一化原子分数、各元素对的贡献以及总 ΔH<sub>mix</sub>。
 - **batch_enthalpy.py**：批量绘图脚本，利用 Plotly + Kaleido 生成二元曲线与三元等值线 PNG（必要时回退到 HTML）。
 
 ## 环境与准备
@@ -15,14 +16,20 @@
 > 输出目录、PNG 导出都由脚本自动创建；若 Kaleido 不可用，脚本会自动改存交互式 HTML。
 
 ## 交互式计算器（enthalpy of mixing.py）
+## 交互式/命令行计算器（enthalpy of mixing.py）
 ```bash
-python "enthalpy of mixing.py"
+python "enthalpy of mixing.py" [--excel PATH] [--line "Fe 20 Al 80"] [--list-elements]
 ```
 - 直接回车使用默认 Excel 路径，或输入自定义路径。
 - 在一行中输入配比，支持空格、逗号、冒号、等号等分隔符，例如：
   - `Fe 20 Al 30 Ni 50`
   - `Fe=20,Al=30,Ni=50`
 - 脚本会自动归一化原子分数，列出所有元素对的 ΔH<sub>mix</sub> 贡献并汇总总值；无效元素符号或缺失数据会被明确提示。
+- `--excel PATH`：指定 Ω 工作簿路径（默认 `Data/Element pair data base matrices.xlsx`）。
+- `--line`：一次性计算一行配比，直接输出结果后退出；省略时进入交互模式。
+- `--list-elements`：打印工作簿支持的元素列表后退出。
+- 输入格式：支持空格、逗号、冒号、等号等分隔符，例如 `Fe 20 Al 30 Ni 50` 或 `Fe=20,Al=30,Ni=50`。
+- 输出：归一化原子分数、各元素对的 ΔH<sub>mix</sub> 贡献以及总 ΔH<sub>mix</sub>；无效符号或缺失数据会有明确提示。
 
 ## 批量绘图（batch_enthalpy.py）
 ```bash
@@ -41,6 +48,7 @@ python batch_enthalpy.py [options]
 1. 批量生成所有支持的二元 ΔH<sub>mix</sub> 曲线（0–100%，步长 0.1%）。
 2. 批量生成所有支持的三元 ΔH<sub>mix</sub> 等值线图。
 3. 四元 ΔH_mix 预览：输入四种元素后，以可旋转的等边四面体展示组成空间与混合焓分布，可选将某一元素含量固定后导出对应的三元投影 PNG/HTML。
+3. 预留的四元模式（当前跳过）。
 4. 自定义组合预览（Plotly 交互式曲线/三角图，可选择导出）。
 
 生成的 PNG 保存在所选输出目录下；若遇到 PNG 导出异常，将在同一路径输出等效的 HTML 以便查看。
