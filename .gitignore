@@ -14,3 +14,4 @@ Data/.DS_Store
 
 # Generated plots
 Data/plots/
+Data/test_ternary_tmp/
