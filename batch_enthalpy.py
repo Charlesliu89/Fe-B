@@ -92,7 +92,7 @@ PLOTLY_ELEMENT_FONT = {
 COLORBAR_LABEL_CONFIG = {
     # Matplotlib can render the TeX-friendly string; Plotly PNG export works best with HTML.
     "text": r"$\Delta H_{\mathrm{mix}}$ (kJ/mol)",
-    "plotly_text": "ΔH<sub>mix</sub> (kJ/mol)",
+    "plotly_text": "ΔH_mix (kJ/mol)",
     "rotation_deg": 0,  # clockwise rotation
     "mat_axes_position": (0.5, 1.02),  # x/y inside Matplotlib color bar axes
     "plotly_position": (1.05, 1.0),  # x/y in Plotly paper coordinates
@@ -224,7 +224,16 @@ def build_ternary_figure(
                 size=6,
                 color=enthalpies,
                 colorscale="Viridis",
-                colorbar=dict(thickness=15, len=0.75, title=""),
+                colorbar=dict(
+                    thickness=15,
+                    len=0.75,
+                    title=dict(
+                        text=COLORBAR_LABEL_CONFIG.get("plotly_text"),
+                        font=PLOTLY_ELEMENT_FONT,
+                        side="top",
+                    ),
+                    xpad=40,
+                ),
             ),
             hovertemplate=(
                 f"{combo[0]}=%{{a:.2f}}%<br>"
@@ -245,10 +254,10 @@ def build_ternary_figure(
             baxis=dict(title=dict(text=combo[1], font=PLOTLY_ELEMENT_FONT)),
             caxis=dict(title=dict(text=combo[2], font=PLOTLY_ELEMENT_FONT)),
         ),
+        margin=dict(l=60, r=200, t=80, b=80),
         template="plotly_white",
     )
     apply_plotly_base_style(fig)
-    add_plotly_colorbar_label(fig)
     return fig
 
 # --------------------------------------------------------------------------- #
