@@ -370,6 +370,21 @@ def build_quaternary_figure(
             )
         )
 
+    shell = go.Mesh3d(
+        x=[v[0] for v in vertices],
+        y=[v[1] for v in vertices],
+        z=[v[2] for v in vertices],
+        i=[0, 0, 0, 1],
+        j=[1, 2, 3, 2],
+        k=[2, 3, 1, 3],
+        opacity=0.15,
+        color="lightgray",
+        flatshading=True,
+        name="composition space",
+        hoverinfo="skip",
+        showscale=False,
+    )
+
     scatter = go.Scatter3d(
         x=x_vals,
         y=y_vals,
@@ -389,12 +404,34 @@ def build_quaternary_figure(
         text=hover_lines,
     )
 
+    fig = go.Figure([shell, scatter, *edge_traces, *vertex_labels])
     fig = go.Figure([scatter, *edge_traces, *vertex_labels])
     fig.update_layout(
         title=dict(
             text=f"Quaternary ΔH<sub>mix</sub>: {'-'.join(combo)}", font=PLOTLY_ELEMENT_FONT
         ),
         scene=dict(
+            xaxis=dict(
+                title="X",
+                showticklabels=False,
+                showgrid=False,
+                zeroline=False,
+                backgroundcolor="white",
+            ),
+            yaxis=dict(
+                title="Y",
+                showticklabels=False,
+                showgrid=False,
+                zeroline=False,
+                backgroundcolor="white",
+            ),
+            zaxis=dict(
+                title="Z",
+                showticklabels=False,
+                showgrid=False,
+                zeroline=False,
+                backgroundcolor="white",
+            ),
             xaxis_title="X",
             yaxis_title="Y",
             zaxis_title="Z",
@@ -404,6 +441,7 @@ def build_quaternary_figure(
         template="plotly_white",
     )
     apply_plotly_base_style(fig)
+    add_plotly_colorbar_label(fig)
     return fig
 
 # --------------------------------------------------------------------------- #
@@ -413,6 +451,7 @@ def build_quaternary_figure(
 BINARY_STEP = 0.001  # 0.1%
 TERNARY_STEP = 0.01  # 1%
 QUATERNARY_STEP = 0.05  # 5% for manageable preview density
+QUATERNARY_MIN_STEP = 0.01  # allow finer previews when desired
 BATCH_CHUNK_SIZE = 100
 
 # --------------------------------------------------------------------------- #
@@ -813,6 +852,25 @@ def handle_quaternary_preview(calculator, tables, output_dir: Path) -> None:
             print("Ω data is incomplete for at least one element pair; choose a different set.")
             continue
 
+        density_raw = input(
+            "Preview step size in % (press Enter for default 5%): "
+        ).strip()
+        preview_step = QUATERNARY_STEP
+        if density_raw:
+            try:
+                preview_step = float(density_raw) / 100.0
+                if preview_step <= 0:
+                    raise ValueError
+                if preview_step < QUATERNARY_MIN_STEP:
+                    print(
+                        f"Clamping to minimum step {QUATERNARY_MIN_STEP * 100:.1f}% for stability."
+                    )
+                    preview_step = QUATERNARY_MIN_STEP
+            except ValueError:
+                print("Invalid percentage. Using default 5% step.")
+                preview_step = QUATERNARY_STEP
+
+        total_units, actual_step = normalize_step(preview_step)
         total_units, actual_step = normalize_step(QUATERNARY_STEP)
         vectors = build_fraction_vectors(4, total_units)
         if not vectors:
@@ -821,6 +879,10 @@ def handle_quaternary_preview(calculator, tables, output_dir: Path) -> None:
                 "Adjust QUATERNARY_STEP if needed."
             )
             continue
+
+        print(
+            f"Sampling {len(vectors)} compositions with {actual_step * 100:.2f}% increments."
+        )
 
         combo = tuple(unique_elements)
         x_vals, y_vals, z_vals, enthalpies, fractions = build_quaternary_points(
@@ -858,6 +920,7 @@ def handle_quaternary_preview(calculator, tables, output_dir: Path) -> None:
                     enthalpies,
                     element,
                     fraction_percent / 100.0,
+                    tolerance=actual_step / 2,
                     tolerance=QUATERNARY_STEP / 2,
                 )
             except ValueError as exc:
