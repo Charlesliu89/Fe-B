@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
-import math
 import os
 import re
 import site
@@ -54,12 +53,6 @@ def _raise_missing_package(package: str, exc: ImportError) -> None:
 _extend_sys_path_with_site_packages()
 
 try:
-    import matplotlib.pyplot as plt
-    import matplotlib.tri as mtri
-except ImportError as exc:  # pragma: no cover - import guard
-    _raise_missing_package("matplotlib", exc)
-
-try:
     import pandas as pd
 except ImportError as exc:  # pragma: no cover - import guard
     _raise_missing_package("pandas", exc)
@@ -71,14 +64,6 @@ except ImportError as exc:  # pragma: no cover - import guard
 
 DEFAULT_FONT_FAMILY = "DejaVu Sans"
 
-# Ensure Δ / Greek letters render correctly across Matplotlib outputs
-plt.rcParams.update(
-    {
-        "font.family": DEFAULT_FONT_FAMILY,
-        "axes.unicode_minus": False,
-    }
-)
-
 # --------------------------------------------------------------------------- #
 # Font configuration (edit here to change all text styles)
 # --------------------------------------------------------------------------- #
@@ -86,11 +71,6 @@ plt.rcParams.update(
 FONT_SIZE = 20
 FONT_COLOR = "black"
 FONT_WEIGHT = "bold"
-
-# Shared export configuration
-MATPLOTLIB_DPI = 320
-MATPLOTLIB_BINARY_FIGSIZE = (7.0, 5.0)
-MATPLOTLIB_TERNARY_FIGSIZE = (7.0, 6.0)
 
 PLOTLY_EXPORT = {
     "width": 1280,
@@ -103,12 +83,6 @@ PLOTLY_BASE_FONT = {
     "color": FONT_COLOR,
 }
 
-ELEMENT_LABEL_FONT = {
-    "fontsize": FONT_SIZE,
-    "fontweight": FONT_WEIGHT,
-    "fontfamily": DEFAULT_FONT_FAMILY,
-    "color": FONT_COLOR,
-}
 PLOTLY_ELEMENT_FONT = {
     **PLOTLY_BASE_FONT,
     "size": FONT_SIZE,
@@ -129,23 +103,6 @@ COLORBAR_LABEL_CONFIG = {
     "font_color": FONT_COLOR,
     "font_family": DEFAULT_FONT_FAMILY,
 }
-
-
-def add_matplotlib_colorbar_label(cbar) -> None:
-    """Apply the shared color bar label style to a Matplotlib color bar."""
-    cfg = COLORBAR_LABEL_CONFIG
-    cbar.ax.text(
-        cfg["mat_axes_position"][0],
-        cfg["mat_axes_position"][1],
-        cfg["text"],
-        transform=cbar.ax.transAxes,
-        rotation=-cfg["rotation_deg"],  # Matplotlib uses CCW-positive angles
-        ha="center",
-        va="bottom",
-        fontsize=cfg["font_size"],
-        fontweight=cfg["font_weight"],
-        color=cfg["font_color"],
-    )
 
 
 def add_plotly_colorbar_label(fig: "go.Figure") -> None:
@@ -181,12 +138,126 @@ def write_plotly_image(fig: "go.Figure", target: Path) -> None:
     """Export Plotly figures with consistent resolution/style settings."""
     fig.write_image(str(target), **PLOTLY_EXPORT)
 
+
+def build_binary_curve(
+    calculator, tables, combo: Sequence[str], total_units: int
+) -> Tuple[List[float], List[float]]:
+    """Compute fractions and enthalpies for a binary combination."""
+    fractions = [i / total_units for i in range(total_units + 1)]
+    enthalpies: List[float] = []
+    for frac_a in fractions:
+        frac_b = 1.0 - frac_a
+        composition = [(combo[0], frac_a), (combo[1], frac_b)]
+        total_enthalpy, _ = calculator.compute_multi_component_enthalpy(tables, composition)
+        enthalpies.append(total_enthalpy)
+    return fractions, enthalpies
+
+
+def build_ternary_points(
+    calculator,
+    tables,
+    combo: Sequence[str],
+    vectors: Sequence[Tuple[int, ...]],
+    total_units: int,
+) -> Tuple[List[float], List[float], List[float], List[float]]:
+    """Compute ternary mole fraction grids and enthalpies."""
+    a_vals: List[float] = []
+    b_vals: List[float] = []
+    c_vals: List[float] = []
+    enthalpies: List[float] = []
+    for vector in vectors:
+        fractions = fractions_from_vector(vector, total_units)
+        composition = list(zip(combo, fractions))
+        total_enthalpy, _ = calculator.compute_multi_component_enthalpy(tables, composition)
+        a_vals.append(fractions[0] * 100)
+        b_vals.append(fractions[1] * 100)
+        c_vals.append(fractions[2] * 100)
+        enthalpies.append(total_enthalpy)
+    return a_vals, b_vals, c_vals, enthalpies
+
+
+def build_binary_figure(
+    combo: Sequence[str], fractions: Sequence[float], enthalpies: Sequence[float]
+) -> "go.Figure":
+    """Return a styled Plotly figure for a binary mixture."""
+    fig = go.Figure(
+        go.Scatter(
+            x=[f * 100 for f in fractions],
+            y=enthalpies,
+            mode="lines+markers",
+            hovertemplate=(
+                f"{combo[0]}=%{{x:.3f}}%\n"
+                f"{combo[1]}=%{{customdata:.3f}}%\n"
+                "ΔH=%{y:.5f} kJ/mol"
+            ),
+            customdata=[(1.0 - f) * 100 for f in fractions],
+        )
+    )
+    fig.update_layout(
+        title=dict(
+            text=r"Binary $\Delta H_{\mathrm{mix}}$: " + "-".join(combo),
+            font=PLOTLY_ELEMENT_FONT,
+        ),
+        xaxis=dict(title=dict(text=f"{combo[0]} atomic %", font=PLOTLY_ELEMENT_FONT)),
+        yaxis=dict(title=dict(text=r"$\Delta H_{\mathrm{mix}}$ (kJ/mol)", font=PLOTLY_ELEMENT_FONT)),
+        template="plotly_white",
+    )
+    apply_plotly_base_style(fig)
+    return fig
+
+
+def build_ternary_figure(
+    combo: Sequence[str],
+    a_vals: Sequence[float],
+    b_vals: Sequence[float],
+    c_vals: Sequence[float],
+    enthalpies: Sequence[float],
+) -> "go.Figure":
+    """Return a styled Plotly ternary scatter figure."""
+    fig = go.Figure(
+        go.Scatterternary(
+            a=a_vals,
+            b=b_vals,
+            c=c_vals,
+            mode="markers",
+            marker=dict(
+                size=6,
+                color=enthalpies,
+                colorscale="Viridis",
+                colorbar=dict(thickness=15, len=0.75, title=""),
+            ),
+            hovertemplate=(
+                f"{combo[0]}=%{{a:.2f}}%<br>"
+                f"{combo[1]}=%{{b:.2f}}%<br>"
+                f"{combo[2]}=%{{c:.2f}}%<br>"
+                "ΔH=%{marker.color:.5f} kJ/mol"
+            ),
+        )
+    )
+    fig.update_layout(
+        title=dict(
+            text=f"Ternary ΔH<sub>mix</sub>: {'-'.join(combo)}",
+            font=PLOTLY_ELEMENT_FONT,
+        ),
+        ternary=dict(
+            sum=100,
+            aaxis=dict(title=dict(text=combo[0], font=PLOTLY_ELEMENT_FONT)),
+            baxis=dict(title=dict(text=combo[1], font=PLOTLY_ELEMENT_FONT)),
+            caxis=dict(title=dict(text=combo[2], font=PLOTLY_ELEMENT_FONT)),
+        ),
+        template="plotly_white",
+    )
+    apply_plotly_base_style(fig)
+    add_plotly_colorbar_label(fig)
+    return fig
+
 # --------------------------------------------------------------------------- #
 # Sampling configuration
 # --------------------------------------------------------------------------- #
 
 BINARY_STEP = 0.001  # 0.1%
 TERNARY_STEP = 0.01  # 1%
+BATCH_CHUNK_SIZE = 100
 
 # --------------------------------------------------------------------------- #
 # Calculator module loading
@@ -249,16 +320,6 @@ def fractions_from_vector(vector: Sequence[int], total_units: int) -> Tuple[floa
     return tuple(value / total_units for value in vector)
 
 
-def barycentric_to_cartesian(fractions: Sequence[float]) -> Tuple[float, float]:
-    """Map ternary fractions (A,B,C) to 2D coordinates inside an equilateral triangle."""
-    if len(fractions) != 3:
-        raise ValueError("Ternary barycentric conversion requires exactly 3 fractions.")
-    a, b, c = fractions
-    x = b + 0.5 * c
-    y = (math.sqrt(3) / 2.0) * c
-    return x, y
-
-
 # --------------------------------------------------------------------------- #
 def combo_supported(calculator, tables, combo: Sequence[str]) -> bool:
     """Return True if every pair within combo has Ω data."""
@@ -273,55 +334,6 @@ def combo_supported(calculator, tables, combo: Sequence[str]) -> bool:
 def ensure_directory(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path
-
-
-def save_binary_plot(combo: Sequence[str], fractions: List[float], enthalpies: List[float], out_dir: Path) -> None:
-    path = ensure_directory(out_dir) / f"{combo[0]}-{combo[1]}.png"
-    plt.figure(figsize=MATPLOTLIB_BINARY_FIGSIZE)
-    plt.plot([f * 100 for f in fractions], enthalpies, lw=1.5)
-    plt.xlabel(f"{combo[0]} atomic %")
-    plt.ylabel(r"$\Delta H_{\mathrm{mix}}$ (kJ/mol)")
-    plt.title(r"Binary $\Delta H_{\mathrm{mix}}$: " + "-".join(combo))
-    plt.grid(True, linestyle="--", alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(path, dpi=MATPLOTLIB_DPI)
-    plt.close()
-
-
-def save_ternary_plot(
-    combo: Sequence[str],
-    xs: List[float],
-    ys: List[float],
-    values: List[float],
-    out_dir: Path,
-) -> None:
-    path = ensure_directory(out_dir) / f"{combo[0]}-{combo[1]}-{combo[2]}.png"
-    plt.figure(figsize=MATPLOTLIB_TERNARY_FIGSIZE)
-    triang = mtri.Triangulation(xs, ys)
-    mesh = plt.tripcolor(triang, values, shading="gouraud", cmap="viridis")
-    cbar = plt.colorbar(mesh)
-    add_matplotlib_colorbar_label(cbar)
-    combo_label = "-".join(combo)
-    plt.title(r"Ternary $\Delta H_{\mathrm{mix}}$: " + combo_label)
-    # annotate corners
-    corners = {
-        combo[0]: (0.0, 0.0),
-        combo[1]: (1.0, 0.0),
-        combo[2]: (0.5, math.sqrt(3) / 2.0),
-    }
-    for name, (x, y) in corners.items():
-        plt.text(
-            x,
-            y,
-            name,
-            ha="center",
-            va="center",
-            **ELEMENT_LABEL_FONT,
-        )
-    plt.axis("off")
-    plt.tight_layout()
-    plt.savefig(path, dpi=MATPLOTLIB_DPI)
-    plt.close()
 
 
 def preview_and_maybe_save(fig: go.Figure, default_path: Path) -> None:
@@ -360,15 +372,23 @@ def _get_worker_state():
     return _WORKER_CALCULATOR, _WORKER_TABLES
 
 
+def _save_binary_figure(combo: Sequence[str], fractions, enthalpies, output_dir: Path) -> None:
+    fig = build_binary_figure(combo, fractions, enthalpies)
+    target = ensure_directory(output_dir) / f"{combo[0]}-{combo[1]}.png"
+    write_plotly_image(fig, target)
+
+
+def _save_ternary_figure(
+    combo: Sequence[str], a_vals, b_vals, c_vals, enthalpies, output_dir: Path
+) -> None:
+    fig = build_ternary_figure(combo, a_vals, b_vals, c_vals, enthalpies)
+    target = ensure_directory(output_dir) / f"{combo[0]}-{combo[1]}-{combo[2]}.png"
+    write_plotly_image(fig, target)
+
+
 def _binary_worker_task(combo: Sequence[str], total_units: int):
     calculator, tables = _get_worker_state()
-    fractions = [i / total_units for i in range(total_units + 1)]
-    enthalpies: List[float] = []
-    for frac_a in fractions:
-        frac_b = 1.0 - frac_a
-        composition = [(combo[0], frac_a), (combo[1], frac_b)]
-        total_enthalpy, _ = calculator.compute_multi_component_enthalpy(tables, composition)
-        enthalpies.append(total_enthalpy)
+    fractions, enthalpies = build_binary_curve(calculator, tables, combo, total_units)
     return combo, fractions, enthalpies
 
 
@@ -378,18 +398,10 @@ def _ternary_worker_task(
     total_units: int,
 ):
     calculator, tables = _get_worker_state()
-    xs: List[float] = []
-    ys: List[float] = []
-    values: List[float] = []
-    for vector in vectors:
-        fractions = fractions_from_vector(vector, total_units)
-        composition = list(zip(combo, fractions))
-        total_enthalpy, _ = calculator.compute_multi_component_enthalpy(tables, composition)
-        x, y = barycentric_to_cartesian(fractions)
-        xs.append(x)
-        ys.append(y)
-        values.append(total_enthalpy)
-    return combo, xs, ys, values
+    a_vals, b_vals, c_vals, enthalpies = build_ternary_points(
+        calculator, tables, combo, vectors, total_units
+    )
+    return combo, a_vals, b_vals, c_vals, enthalpies
 
 
 # --------------------------------------------------------------------------- #
@@ -404,6 +416,7 @@ def run_batch(
     elements: Sequence[str],
     output_path: Path,
     workers: int = 1,
+    chunk_size: int = BATCH_CHUNK_SIZE,
 ) -> None:
     """Generate one plot per element combination for the chosen component count."""
     if component_count not in {2, 3, 4}:
@@ -432,9 +445,7 @@ def run_batch(
             skipped += 1
             continue
 
-        if component_count == 2:
-            supported_combos.append(combo)
-        elif component_count == 3:
+        if component_count in {2, 3}:
             supported_combos.append(combo)
         else:
             print(f"[info] Skipping {combo}: quaternary plotting not implemented.")
@@ -451,88 +462,88 @@ def run_batch(
 
     worker_count = min(max(1, workers), len(supported_combos))
 
-    if worker_count == 1:
-        for combo in supported_combos:
+    def process_chunk(chunk: List[Tuple[str, ...]], use_parallel: bool) -> int:
+        completed = 0
+        if use_parallel and len(chunk) > 1:
+            calculator_path = getattr(calculator, "__file__", None)
+            if not calculator_path:
+                raise RuntimeError("Calculator module path is required for parallel execution.")
+            init_args = (str(calculator_path), tables)
+            with ProcessPoolExecutor(
+                max_workers=min(worker_count, len(chunk)),
+                initializer=_parallel_initializer,
+                initargs=init_args,
+            ) as executor:
+                futures = []
+                for combo in chunk:
+                    if component_count == 2:
+                        futures.append(executor.submit(_binary_worker_task, combo, total_units))
+                    else:
+                        assert vectors is not None
+                        futures.append(
+                            executor.submit(_ternary_worker_task, combo, vectors, total_units)
+                        )
+                for future in as_completed(futures):
+                    result = future.result()
+                    if component_count == 2:
+                        combo, fractions, enthalpies = result
+                        _save_binary_figure(combo, fractions, enthalpies, output_path / "binary")
+                    else:
+                        combo, a_vals, b_vals, c_vals, enthalpies = result
+                        _save_ternary_figure(
+                            combo, a_vals, b_vals, c_vals, enthalpies, output_path / "ternary"
+                        )
+                    completed += 1
+            return completed
+
+        for combo in chunk:
             if component_count == 2:
-                plot_binary_combination(
-                    calculator, tables, combo, total_units, output_path / "binary"
-                )
+                fractions, enthalpies = build_binary_curve(calculator, tables, combo, total_units)
+                _save_binary_figure(combo, fractions, enthalpies, output_path / "binary")
             else:
                 assert vectors is not None
-                plot_ternary_combination(
-                    calculator,
-                    tables,
-                    combo,
-                    vectors,
-                    total_units,
-                    output_path / "ternary",
+                a_vals, b_vals, c_vals, enthalpies = build_ternary_points(
+                    calculator, tables, combo, vectors, total_units
                 )
-            processed += 1
-    else:
-        calculator_path = getattr(calculator, "__file__", None)
-        if not calculator_path:
-            raise RuntimeError("Calculator module path is required for parallel execution.")
-        init_args = (str(calculator_path), tables)
-        with ProcessPoolExecutor(
-            max_workers=worker_count,
-            initializer=_parallel_initializer,
-            initargs=init_args,
-        ) as executor:
-            futures = []
-            for combo in supported_combos:
-                if component_count == 2:
-                    futures.append(executor.submit(_binary_worker_task, combo, total_units))
-                else:
-                    assert vectors is not None
-                    futures.append(executor.submit(_ternary_worker_task, combo, vectors, total_units))
-            for future in as_completed(futures):
-                result = future.result()
-                if component_count == 2:
-                    combo, fractions, enthalpies = result
-                    save_binary_plot(combo, fractions, enthalpies, output_path / "binary")
-                else:
-                    combo, xs, ys, values = result
-                    save_ternary_plot(combo, xs, ys, values, output_path / "ternary")
-                processed += 1
+                _save_ternary_figure(
+                    combo, a_vals, b_vals, c_vals, enthalpies, output_path / "ternary"
+                )
+            completed += 1
+        return completed
+
+    export_all_remaining = False
+    index = 0
+    total = len(supported_combos)
+    while index < total:
+        current_chunk_size = total - index if export_all_remaining else chunk_size
+        chunk = supported_combos[index : index + current_chunk_size]
+        processed += process_chunk(chunk, use_parallel=worker_count > 1)
+        index += len(chunk)
+
+        if index >= total:
+            break
+
+        while True:
+            decision = input(
+                f"Exported {index}/{total} images. "
+                f"Press 'c' to continue next {chunk_size}, 'a' to export all remaining, "
+                "or 'q' to stop: "
+            ).strip().lower()
+            if decision in {"c", "", "continue"}:
+                break
+            if decision in {"a", "all"}:
+                export_all_remaining = True
+                break
+            if decision in {"q", "quit", "stop"}:
+                index = total  # exit outer loop
+                break
+            print("Please enter 'c', 'a', or 'q'.")
 
     print(
         f"[summary] step={actual_step:.4f}, workers={worker_count}: "
         f"{processed} combinations plotted, {skipped} skipped.",
         file=sys.stderr,
     )
-
-
-def plot_binary_combination(calculator, tables, combo, total_units, output_dir: Path) -> None:
-    fractions = [i / total_units for i in range(total_units + 1)]
-    enthalpies: List[float] = []
-    for frac_a in fractions:
-        frac_b = 1.0 - frac_a
-        composition = [(combo[0], frac_a), (combo[1], frac_b)]
-        total_enthalpy, _ = calculator.compute_multi_component_enthalpy(tables, composition)
-        enthalpies.append(total_enthalpy)
-    save_binary_plot(combo, fractions, enthalpies, output_dir)
-
-
-def plot_ternary_combination(
-    calculator,
-    tables,
-    combo,
-    vectors: Sequence[Tuple[int, ...]],
-    total_units: int,
-    output_dir: Path,
-) -> None:
-    xs: List[float] = []
-    ys: List[float] = []
-    values: List[float] = []
-    for vector in vectors:
-        fractions = fractions_from_vector(vector, total_units)
-        composition = list(zip(combo, fractions))
-        total_enthalpy, _ = calculator.compute_multi_component_enthalpy(tables, composition)
-        x, y = barycentric_to_cartesian(fractions)
-        xs.append(x)
-        ys.append(y)
-        values.append(total_enthalpy)
-    save_ternary_plot(combo, xs, ys, values, output_dir)
 
 
 def handle_custom_plot(calculator, tables, output_dir: Path) -> None:
@@ -564,105 +575,12 @@ def handle_custom_plot(calculator, tables, output_dir: Path) -> None:
                 print(f"Element {element} is not available in the database.")
                 break
         else:
-            component_count = len(unique_elements)
-            step_value = BINARY_STEP if component_count == 2 else TERNARY_STEP
-            total_units, _ = normalize_step(step_value)
-            combo = tuple(unique_elements)
-
-            if component_count == 2:
-                fractions = [i / total_units for i in range(total_units + 1)]
-                enthalpies = []
-                for frac_a in fractions:
-                    frac_b = 1.0 - frac_a
-                    composition = [(combo[0], frac_a), (combo[1], frac_b)]
-                    total_enthalpy, _ = calculator.compute_multi_component_enthalpy(
-                        tables, composition
-                    )
-                    enthalpies.append(total_enthalpy)
-                fig = go.Figure(
-                    go.Scatter(
-                        x=[f * 100 for f in fractions],
-                        y=enthalpies,
-                        mode="lines+markers",
-                        hovertemplate=(
-                            f"{combo[0]}=%{{x:.3f}}%\n"
-                            f"{combo[1]}=%{{customdata:.3f}}%\n"
-                            "ΔH=%{y:.5f} kJ/mol"
-                        ),
-                        customdata=[(1.0 - f) * 100 for f in fractions],
-                    )
-                )
-                fig.update_layout(
-                    title=dict(
-                        text=r"Binary $\Delta H_{\mathrm{mix}}$: " + "-".join(combo),
-                        font=PLOTLY_ELEMENT_FONT,
-                    ),
-                    xaxis=dict(title=dict(text=f"{combo[0]} atomic %", font=PLOTLY_ELEMENT_FONT)),
-                    yaxis=dict(
-                        title=dict(text=r"$\Delta H_{\mathrm{mix}}$ (kJ/mol)", font=PLOTLY_ELEMENT_FONT)
-                    ),
-                    template="plotly_white",
-                )
-                apply_plotly_base_style(fig)
-                preview_and_maybe_save(fig, custom_dir / f"{combo[0]}-{combo[1]}.png")
-            elif component_count == 3:
-                vectors = build_fraction_vectors(3, total_units)
-                a_vals = []
-                b_vals = []
-                c_vals = []
-                enthalpies = []
-                for vector in vectors:
-                    fractions = fractions_from_vector(vector, total_units)
-                    composition = list(zip(combo, fractions))
-                    total_enthalpy, _ = calculator.compute_multi_component_enthalpy(
-                        tables, composition
-                    )
-                    a_vals.append(fractions[0] * 100)
-                    b_vals.append(fractions[1] * 100)
-                    c_vals.append(fractions[2] * 100)
-                    enthalpies.append(total_enthalpy)
-                fig = go.Figure(
-                    go.Scatterternary(
-                        a=a_vals,
-                        b=b_vals,
-                        c=c_vals,
-                        mode="markers",
-                        marker=dict(
-                            size=6,
-                            color=enthalpies,
-                            colorscale="Viridis",
-                            colorbar=dict(
-                                title=dict(
-                                    text=COLORBAR_LABEL_CONFIG.get("plotly_text"),
-                                    font=PLOTLY_ELEMENT_FONT,
-                                ),
-                            ),
-                        ),
-                        hovertemplate=(
-                            f"{combo[0]}=%{{a:.2f}}%<br>"
-                            f"{combo[1]}=%{{b:.2f}}%<br>"
-                            f"{combo[2]}=%{{c:.2f}}%<br>"
-                            "ΔH=%{marker.color:.5f} kJ/mol"
-                        ),
-                    )
-                )
-                fig.update_layout(
-                    title=dict(
-                        text=f"Ternary ΔH<sub>mix</sub>: {'-'.join(combo)}",
-                        font=PLOTLY_ELEMENT_FONT,
-                    ),
-                    ternary=dict(
-                        sum=100,
-                        aaxis=dict(title=dict(text=combo[0], font=PLOTLY_ELEMENT_FONT)),
-                        baxis=dict(title=dict(text=combo[1], font=PLOTLY_ELEMENT_FONT)),
-                        caxis=dict(title=dict(text=combo[2], font=PLOTLY_ELEMENT_FONT)),
-                    ),
-                    template="plotly_white",
-                )
-                apply_plotly_base_style(fig)
-                preview_and_maybe_save(fig, custom_dir / f"{combo[0]}-{combo[1]}-{combo[2]}.png")
-            else:
-                print("Quaternary plotting is not supported yet.")
+            try:
+                fig, filename = build_custom_plot(calculator, tables, unique_elements)
+            except ValueError as exc:
+                print(exc)
+                continue
+            preview_and_maybe_save(fig, custom_dir / filename)
 
 
 def build_custom_plot(
@@ -683,91 +601,16 @@ def build_custom_plot(
     combo = tuple(elements)
 
     if component_count == 2:
-        fractions = [i / total_units for i in range(total_units + 1)]
-        enthalpies: List[float] = []
-        for frac_a in fractions:
-            frac_b = 1.0 - frac_a
-            composition = [(combo[0], frac_a), (combo[1], frac_b)]
-            total_enthalpy, _ = calculator.compute_multi_component_enthalpy(tables, composition)
-            enthalpies.append(total_enthalpy)
-        fig = go.Figure(
-            go.Scatter(
-                x=[f * 100 for f in fractions],
-                y=enthalpies,
-                mode="lines+markers",
-                hovertemplate=(
-                    f"{combo[0]}=%{{x:.3f}}%\n"
-                    f"{combo[1]}=%{{customdata:.3f}}%\n"
-                    "ΔH=%{y:.5f} kJ/mol"
-                ),
-                customdata=[(1.0 - f) * 100 for f in fractions],
-            )
-        )
-        fig.update_layout(
-            title=dict(
-                text=r"Binary $\Delta H_{\mathrm{mix}}$: " + "-".join(combo),
-                font=PLOTLY_ELEMENT_FONT,
-            ),
-            xaxis=dict(title=dict(text=f"{combo[0]} atomic %", font=PLOTLY_ELEMENT_FONT)),
-            yaxis=dict(title=dict(text=r"$\Delta H_{\mathrm{mix}}$ (kJ/mol)", font=PLOTLY_ELEMENT_FONT)),
-            template="plotly_white",
-        )
-        apply_plotly_base_style(fig)
+        fractions, enthalpies = build_binary_curve(calculator, tables, combo, total_units)
+        fig = build_binary_figure(combo, fractions, enthalpies)
         return fig, f"{combo[0]}-{combo[1]}.png"
 
     if component_count == 3:
         vectors = build_fraction_vectors(3, total_units)
-        a_vals: List[float] = []
-        b_vals: List[float] = []
-        c_vals: List[float] = []
-        enthalpies: List[float] = []
-        for vector in vectors:
-            fractions = fractions_from_vector(vector, total_units)
-            composition = list(zip(combo, fractions))
-            total_enthalpy, _ = calculator.compute_multi_component_enthalpy(tables, composition)
-            a_vals.append(fractions[0] * 100)
-            b_vals.append(fractions[1] * 100)
-            c_vals.append(fractions[2] * 100)
-            enthalpies.append(total_enthalpy)
-        fig = go.Figure(
-            go.Scatterternary(
-                a=a_vals,
-                b=b_vals,
-                c=c_vals,
-                mode="markers",
-                marker=dict(
-                    size=6,
-                    color=enthalpies,
-                    colorscale="Viridis",
-                    colorbar=dict(
-                        title=dict(
-                            text=COLORBAR_LABEL_CONFIG.get("plotly_text"),
-                            font=PLOTLY_ELEMENT_FONT,
-                        ),
-                    ),
-                ),
-                hovertemplate=(
-                    f"{combo[0]}=%{{a:.2f}}%<br>"
-                    f"{combo[1]}=%{{b:.2f}}%<br>"
-                    f"{combo[2]}=%{{c:.2f}}%<br>"
-                    "ΔH=%{marker.color:.5f} kJ/mol"
-                ),
-            )
+        a_vals, b_vals, c_vals, enthalpies = build_ternary_points(
+            calculator, tables, combo, vectors, total_units
         )
-        fig.update_layout(
-            title=dict(
-                text=f"Ternary ΔH<sub>mix</sub>: {'-'.join(combo)}",
-                font=PLOTLY_ELEMENT_FONT,
-            ),
-            ternary=dict(
-                sum=100,
-                aaxis=dict(title=dict(text=combo[0], font=PLOTLY_ELEMENT_FONT)),
-                baxis=dict(title=dict(text=combo[1], font=PLOTLY_ELEMENT_FONT)),
-                caxis=dict(title=dict(text=combo[2], font=PLOTLY_ELEMENT_FONT)),
-            ),
-            template="plotly_white",
-        )
-        apply_plotly_base_style(fig)
+        fig = build_ternary_figure(combo, a_vals, b_vals, c_vals, enthalpies)
         return fig, f"{combo[0]}-{combo[1]}-{combo[2]}.png"
 
     raise ValueError("Quaternary plotting is not supported yet.")
