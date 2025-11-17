@@ -334,7 +334,7 @@ def build_quaternary_figure(
                 z=[vertices[idx][2]],
                 mode="text",
                 text=[f"<b>{name}</b>"],
-                textfont=dict(**PLOTLY_ELEMENT_FONT, size=FONT_SIZE + 2),
+                textfont={**PLOTLY_ELEMENT_FONT, "size": FONT_SIZE + 2},
                 hoverinfo="skip",
                 showlegend=False,
             )
@@ -391,20 +391,21 @@ def build_quaternary_figure(
         z=z_vals,
         mode="markers",
         marker=dict(
-            size=4,
+            size=5,
             color=enthalpies,
-            colorscale="Viridis",
-            opacity=0.75,
+            colorscale="Plasma",
+            opacity=0.8,
             colorbar=dict(
                 title=dict(text=COLORBAR_LABEL_CONFIG.get("plotly_text"), font=PLOTLY_ELEMENT_FONT),
-                len=0.6,
+                len=0.65,
+                thickness=18,
+                xpad=50,
             ),
         ),
         hovertemplate="%{text}<br>ΔH=%{marker.color:.5f} kJ/mol",
         text=hover_lines,
     )
 
-    fig = go.Figure([shell, scatter, *edge_traces, *vertex_labels])
     fig = go.Figure([scatter, *edge_traces, *vertex_labels])
     fig.update_layout(
         title=dict(
@@ -437,7 +438,7 @@ def build_quaternary_figure(
             zaxis_title="Z",
             aspectmode="data",
         ),
-        margin=dict(l=0, r=0, t=60, b=0),
+        margin=dict(l=20, r=140, t=80, b=20),
         template="plotly_white",
     )
     apply_plotly_base_style(fig)
@@ -450,8 +451,8 @@ def build_quaternary_figure(
 
 BINARY_STEP = 0.001  # 0.1%
 TERNARY_STEP = 0.01  # 1%
-QUATERNARY_STEP = 0.05  # 5% for manageable preview density
-QUATERNARY_MIN_STEP = 0.01  # allow finer previews when desired
+QUATERNARY_STEP = 0.01  # default 1% for finer preview density
+QUATERNARY_MIN_STEP = 0.01  # do not allow below 1% for stability/perf
 BATCH_CHUNK_SIZE = 100
 
 # --------------------------------------------------------------------------- #
@@ -547,14 +548,14 @@ def preview_and_maybe_save(fig: go.Figure, default_path: Path) -> None:
 
 
 def _slice_quaternary_data(
+    calculator,
+    tables,
     combo: Sequence[str],
-    fractions: Sequence[Tuple[float, ...]],
-    enthalpies: Sequence[float],
     fixed_element: str,
     fixed_fraction: float,
-    tolerance: float,
+    step: float = BINARY_STEP,  # 0.1% increments for slice projection
 ) -> Tuple[Sequence[str], List[float], List[float], List[float], List[float]]:
-    """Extract a ternary slice by fixing one element's fraction (within tolerance)."""
+    """Re-sample a ternary slice by fixing one element and recomputing ΔH on the slice grid."""
 
     if fixed_fraction <= 0 or fixed_fraction >= 1:
         raise ValueError("Fixed fraction must be within (0, 1).")
@@ -562,29 +563,31 @@ def _slice_quaternary_data(
     if fixed_element not in combo:
         raise ValueError(f"{fixed_element} is not part of the chosen quaternary system.")
 
-    fixed_index = combo.index(fixed_element)
     remaining_elements = [elem for elem in combo if elem != fixed_element]
+    remainder = 1.0 - fixed_fraction
+    if remainder <= 0:
+        raise ValueError("Fixed fraction leaves no remaining composition to vary.")
+
+    total_units, _ = normalize_step(step)
+    vectors = build_fraction_vectors(3, total_units)
+    if not vectors:
+        raise ValueError("No feasible slice compositions were generated.")
 
     a_vals: List[float] = []
     b_vals: List[float] = []
     c_vals: List[float] = []
     enthalpy_slice: List[float] = []
 
-    for frac, enthalpy in zip(fractions, enthalpies):
-        if abs(frac[fixed_index] - fixed_fraction) > tolerance:
-            continue
-        remainder = 1.0 - fixed_fraction
-        if remainder <= 0:
-            continue
+    for vector in vectors:
+        frac_rest = fractions_from_vector(vector, total_units)  # sums to 1 for remaining 3
+        scaled_rest = [value * remainder for value in frac_rest]
+        composition = [(fixed_element, fixed_fraction)] + list(zip(remaining_elements, scaled_rest))
+        total_enthalpy, _ = calculator.compute_multi_component_enthalpy(tables, composition)
 
-        renormalized = [value / remainder for idx, value in enumerate(frac) if idx != fixed_index]
-        if len(renormalized) != 3:
-            continue
-
-        a_vals.append(renormalized[0] * 100)
-        b_vals.append(renormalized[1] * 100)
-        c_vals.append(renormalized[2] * 100)
-        enthalpy_slice.append(enthalpy)
+        a_vals.append(frac_rest[0] * 100)
+        b_vals.append(frac_rest[1] * 100)
+        c_vals.append(frac_rest[2] * 100)
+        enthalpy_slice.append(total_enthalpy)
 
     return remaining_elements, a_vals, b_vals, c_vals, enthalpy_slice
 
@@ -655,6 +658,7 @@ def run_batch(
     output_path: Path,
     workers: int = 1,
     chunk_size: int = BATCH_CHUNK_SIZE,
+    prompt_chunks: bool = True,
 ) -> None:
     """Generate one plot per element combination for the chosen component count."""
     if component_count not in {2, 3, 4}:
@@ -756,12 +760,17 @@ def run_batch(
     total = len(supported_combos)
     while index < total:
         current_chunk_size = total - index if export_all_remaining else chunk_size
+        if current_chunk_size <= 0:
+            current_chunk_size = total - index  # no chunking when chunk_size<=0
         chunk = supported_combos[index : index + current_chunk_size]
         processed += process_chunk(chunk, use_parallel=worker_count > 1)
         index += len(chunk)
 
         if index >= total:
             break
+
+        if not prompt_chunks:
+            continue
 
         while True:
             decision = input(
@@ -853,7 +862,7 @@ def handle_quaternary_preview(calculator, tables, output_dir: Path) -> None:
             continue
 
         density_raw = input(
-            "Preview step size in % (press Enter for default 5%): "
+            "Preview step size in % (press Enter for default 1%): "
         ).strip()
         preview_step = QUATERNARY_STEP
         if density_raw:
@@ -867,11 +876,10 @@ def handle_quaternary_preview(calculator, tables, output_dir: Path) -> None:
                     )
                     preview_step = QUATERNARY_MIN_STEP
             except ValueError:
-                print("Invalid percentage. Using default 5% step.")
+                print("Invalid percentage. Using default 1% step.")
                 preview_step = QUATERNARY_STEP
 
         total_units, actual_step = normalize_step(preview_step)
-        total_units, actual_step = normalize_step(QUATERNARY_STEP)
         vectors = build_fraction_vectors(4, total_units)
         if not vectors:
             print(
@@ -892,22 +900,22 @@ def handle_quaternary_preview(calculator, tables, output_dir: Path) -> None:
         fig.show(config={"displaylogo": False, "displayModeBar": True})
 
         while True:
-            slice_choice = input(
-                "Export ternary projection by fixing one element (e.g., Fe=25)? (y/n): "
-            ).strip().lower()
-            if slice_choice in {"n", "no"}:
+            slice_raw = input(
+                "Fix one element and its fraction% (e.g., Fe=25 or Fe 25). Press Enter to skip: "
+            ).strip()
+            if not slice_raw:
                 break
-            if slice_choice not in {"y", "yes"}:
-                print("Please answer 'y' or 'n'.")
-                continue
 
-            slice_raw = input("Enter element=fraction% to fix (e.g., Fe=25): ").strip()
-            match = re.match(r"([A-Za-z]+)\s*=\s*([0-9]+(?:\.[0-9]+)?)", slice_raw)
+            match = re.match(r"([A-Za-z]+)\s*[=\s]\s*([0-9]+(?:\.[0-9]+)?)", slice_raw)
             if not match:
                 print("Invalid format. Use Element=number (percentage).")
                 continue
 
             element = calculator.normalize_symbol(match.group(1))
+            if element not in combo:
+                print(f"Element must be one of the current four: {', '.join(combo)}.")
+                continue
+
             fraction_percent = float(match.group(2))
             if fraction_percent <= 0 or fraction_percent >= 100:
                 print("Fraction must be between 0 and 100 (exclusive).")
@@ -915,13 +923,12 @@ def handle_quaternary_preview(calculator, tables, output_dir: Path) -> None:
 
             try:
                 remaining_elements, a_vals, b_vals, c_vals, enthalpy_slice = _slice_quaternary_data(
+                    calculator,
+                    tables,
                     combo,
-                    fractions,
-                    enthalpies,
                     element,
                     fraction_percent / 100.0,
-                    tolerance=actual_step / 2,
-                    tolerance=QUATERNARY_STEP / 2,
+                    step=BINARY_STEP,  # 0.1% increments for the slice
                 )
             except ValueError as exc:
                 print(exc)
@@ -1067,6 +1074,17 @@ def parse_args() -> argparse.Namespace:
         default=os.cpu_count() or 1,
         help="Number of parallel worker processes to use (default: CPU count).",
     )
+    parser.add_argument(
+        "--chunk-size",
+        type=positive_int,
+        default=BATCH_CHUNK_SIZE,
+        help="Number of combinations to process before prompting (set 0 to disable chunking).",
+    )
+    parser.add_argument(
+        "--chunk-auto-continue",
+        action="store_true",
+        help="Process all chunks without interactive prompts (useful for batch/CI).",
+    )
     return parser.parse_args()
 
 
@@ -1124,6 +1142,8 @@ def main() -> None:
                     elements=element_pool,
                     output_path=args.output_dir,
                     workers=args.workers,
+                    chunk_size=args.chunk_size,
+                    prompt_chunks=sys.stdin.isatty() and not args.chunk_auto_continue,
                 )
             except Exception as exc:  # pylint: disable=broad-except
                 print(f"Binary plotting failed: {exc}")
@@ -1136,6 +1156,8 @@ def main() -> None:
                     elements=element_pool,
                     output_path=args.output_dir,
                     workers=args.workers,
+                    chunk_size=args.chunk_size,
+                    prompt_chunks=sys.stdin.isatty() and not args.chunk_auto_continue,
                 )
             except Exception as exc:  # pylint: disable=broad-except
                 print(f"Ternary plotting failed: {exc}")
