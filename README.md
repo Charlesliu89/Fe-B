@@ -31,6 +31,8 @@ python -m pip install -r requirements.txt
 ## 数据准备 / Data preparation
 - 默认读取 `Data/Element pair data base matrices.xlsx`。  
   Workbook is expected at `Data/Element pair data base matrices.xlsx`.
+- 数据文件与生成图片不提交到仓库，请在本地准备并保留。  
+  Data files and generated images are kept locally (not tracked in git).
 - 确认工作表 `U0`、`U1`、`U2`、`U3` 已按原子序填充配对系数；如有更新，请同步 Excel。  
   Ensure sheets `U0`–`U3` contain pair coefficients ordered by atomic number; update Excel when data change.
 

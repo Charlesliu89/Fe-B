@@ -12,6 +12,11 @@ __pycache__/
 .DS_Store
 Data/.DS_Store
 
-# Generated plots
-Data/plots/
-Data/test_ternary_tmp/
+# Local data and generated assets (keep local, don't sync)
+Data/
+*.xlsx
+*.csv
+*.png
+*.jpg
+*.jpeg
+*.svg
